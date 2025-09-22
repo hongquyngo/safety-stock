@@ -5,12 +5,13 @@ CRUD operations for Safety Stock Management
 
 import pandas as pd
 import logging
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from sqlalchemy import text
 from ..db import get_db_engine
 
 logger = logging.getLogger(__name__)
+
 
 # ==================== READ Operations ====================
 
@@ -26,7 +27,7 @@ def get_safety_stock_levels(
     
     Args:
         entity_id: Filter by entity
-        customer_id: Filter by customer
+        customer_id: Filter by customer (None for all, 'general' for NULL only)
         product_search: Search in product PT code or name
         status: Filter by status (active/all/expired/future)
         include_inactive: Include inactive records
@@ -41,14 +42,17 @@ def get_safety_stock_levels(
         conditions = ["s.delete_flag = 0"]
         params = {}
         
-        if not include_inactive:
+        if not include_inactive and status != 'all':
             conditions.append("s.is_active = 1")
         
         if entity_id:
             conditions.append("s.entity_id = :entity_id")
             params['entity_id'] = entity_id
         
-        if customer_id:
+        # Handle customer filter
+        if customer_id == 'general':
+            conditions.append("s.customer_id IS NULL")
+        elif customer_id:
             conditions.append("s.customer_id = :customer_id")
             params['customer_id'] = customer_id
         
@@ -61,10 +65,9 @@ def get_safety_stock_levels(
             conditions.append("CURRENT_DATE() >= s.effective_from")
             conditions.append("(s.effective_to IS NULL OR CURRENT_DATE() <= s.effective_to)")
         elif status == 'expired':
-            conditions.append("CURRENT_DATE() > s.effective_to")
+            conditions.append("s.effective_to IS NOT NULL AND CURRENT_DATE() > s.effective_to")
         elif status == 'future':
             conditions.append("CURRENT_DATE() < s.effective_from")
-        # 'all' status doesn't add date conditions
         
         where_clause = " AND ".join(conditions)
         
@@ -117,7 +120,7 @@ def get_safety_stock_levels(
                 THEN 'Active'
                 WHEN CURRENT_DATE() < s.effective_from 
                 THEN 'Future'
-                WHEN CURRENT_DATE() > s.effective_to
+                WHEN s.effective_to IS NOT NULL AND CURRENT_DATE() > s.effective_to
                 THEN 'Expired'
                 ELSE 'Inactive'
             END as status,
@@ -164,23 +167,19 @@ def get_safety_stock_by_id(safety_stock_id: int) -> Optional[Dict]:
         query = text("""
         SELECT 
             s.*,
+            p.pt_code,
+            p.name as product_name,
             ssp.calculation_method,
             ssp.lead_time_days,
             ssp.lead_time_variability_days,
             ssp.safety_days,
-            ssp.review_period_days,
-            ssp.demand_variability_factor,
             ssp.demand_std_deviation,
             ssp.avg_daily_demand,
             ssp.service_level_percent,
-            ssp.z_score,
-            ssp.historical_days,
-            ssp.exclude_outliers,
-            ssp.seasonality_adjusted,
             ssp.last_calculated_date,
-            ssp.calculation_notes,
             ssp.formula_used
         FROM safety_stock_levels s
+        LEFT JOIN products p ON s.product_id = p.id
         LEFT JOIN safety_stock_parameters ssp ON s.id = ssp.safety_stock_level_id
         WHERE s.id = :id AND s.delete_flag = 0
         """)
@@ -188,9 +187,7 @@ def get_safety_stock_by_id(safety_stock_id: int) -> Optional[Dict]:
         with engine.connect() as conn:
             result = conn.execute(query, {'id': safety_stock_id}).fetchone()
         
-        if result:
-            return dict(result._mapping)
-        return None
+        return dict(result._mapping) if result else None
         
     except Exception as e:
         logger.error(f"Error fetching safety stock by ID: {e}")
@@ -201,7 +198,7 @@ def get_safety_stock_by_id(safety_stock_id: int) -> Optional[Dict]:
 
 def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
     """
-    Create new safety stock record
+    Create new safety stock record with parameters
     
     Args:
         data: Safety stock data dictionary
@@ -213,26 +210,26 @@ def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
     try:
         engine = get_db_engine()
         
-        # Insert into safety_stock_levels
-        insert_query = text("""
-        INSERT INTO safety_stock_levels (
-            product_id, entity_id, customer_id,
-            safety_stock_qty, min_stock_qty, max_stock_qty,
-            reorder_point, reorder_qty,
-            effective_from, effective_to, is_active,
-            priority_level, business_notes,
-            created_by, updated_by
-        ) VALUES (
-            :product_id, :entity_id, :customer_id,
-            :safety_stock_qty, :min_stock_qty, :max_stock_qty,
-            :reorder_point, :reorder_qty,
-            :effective_from, :effective_to, :is_active,
-            :priority_level, :business_notes,
-            :created_by, :updated_by
-        )
-        """)
-        
         with engine.begin() as conn:
+            # Insert main record
+            insert_query = text("""
+            INSERT INTO safety_stock_levels (
+                product_id, entity_id, customer_id,
+                safety_stock_qty, min_stock_qty, max_stock_qty,
+                reorder_point, reorder_qty,
+                effective_from, effective_to, is_active,
+                priority_level, business_notes,
+                created_by, updated_by
+            ) VALUES (
+                :product_id, :entity_id, :customer_id,
+                :safety_stock_qty, :min_stock_qty, :max_stock_qty,
+                :reorder_point, :reorder_qty,
+                :effective_from, :effective_to, :is_active,
+                :priority_level, :business_notes,
+                :created_by, :updated_by
+            )
+            """)
+            
             result = conn.execute(insert_query, {
                 'product_id': data['product_id'],
                 'entity_id': data['entity_id'],
@@ -253,46 +250,9 @@ def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
             
             safety_stock_id = result.lastrowid
             
-            # If calculation parameters provided, insert them
-            if 'calculation_method' in data:
-                params_query = text("""
-                INSERT INTO safety_stock_parameters (
-                    safety_stock_level_id, calculation_method,
-                    lead_time_days, lead_time_variability_days,
-                    safety_days, review_period_days,
-                    demand_variability_factor, demand_std_deviation,
-                    avg_daily_demand, service_level_percent, z_score,
-                    historical_days, exclude_outliers, seasonality_adjusted,
-                    calculation_notes, formula_used, last_calculated_date
-                ) VALUES (
-                    :safety_stock_level_id, :calculation_method,
-                    :lead_time_days, :lead_time_variability_days,
-                    :safety_days, :review_period_days,
-                    :demand_variability_factor, :demand_std_deviation,
-                    :avg_daily_demand, :service_level_percent, :z_score,
-                    :historical_days, :exclude_outliers, :seasonality_adjusted,
-                    :calculation_notes, :formula_used, NOW()
-                )
-                """)
-                
-                conn.execute(params_query, {
-                    'safety_stock_level_id': safety_stock_id,
-                    'calculation_method': data.get('calculation_method', 'FIXED'),
-                    'lead_time_days': data.get('lead_time_days'),
-                    'lead_time_variability_days': data.get('lead_time_variability_days'),
-                    'safety_days': data.get('safety_days'),
-                    'review_period_days': data.get('review_period_days'),
-                    'demand_variability_factor': data.get('demand_variability_factor'),
-                    'demand_std_deviation': data.get('demand_std_deviation'),
-                    'avg_daily_demand': data.get('avg_daily_demand'),
-                    'service_level_percent': data.get('service_level_percent'),
-                    'z_score': data.get('z_score'),
-                    'historical_days': data.get('historical_days', 90),
-                    'exclude_outliers': data.get('exclude_outliers', 1),
-                    'seasonality_adjusted': data.get('seasonality_adjusted', 0),
-                    'calculation_notes': data.get('calculation_notes'),
-                    'formula_used': data.get('formula_used')
-                })
+            # Insert calculation parameters if provided
+            if data.get('calculation_method'):
+                _insert_parameters(conn, safety_stock_id, data)
         
         logger.info(f"Created safety stock record ID: {safety_stock_id}")
         return True, str(safety_stock_id)
@@ -302,9 +262,43 @@ def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
         return False, str(e)
 
 
+def _insert_parameters(conn, safety_stock_id: int, data: Dict):
+    """Helper to insert calculation parameters"""
+    params_query = text("""
+    INSERT INTO safety_stock_parameters (
+        safety_stock_level_id, calculation_method,
+        lead_time_days, safety_days,
+        demand_std_deviation, avg_daily_demand,
+        service_level_percent, formula_used,
+        last_calculated_date
+    ) VALUES (
+        :safety_stock_level_id, :calculation_method,
+        :lead_time_days, :safety_days,
+        :demand_std_deviation, :avg_daily_demand,
+        :service_level_percent, :formula_used,
+        NOW()
+    )
+    """)
+    
+    conn.execute(params_query, {
+        'safety_stock_level_id': safety_stock_id,
+        'calculation_method': data.get('calculation_method', 'FIXED'),
+        'lead_time_days': data.get('lead_time_days'),
+        'safety_days': data.get('safety_days'),
+        'demand_std_deviation': data.get('demand_std_deviation'),
+        'avg_daily_demand': data.get('avg_daily_demand'),
+        'service_level_percent': data.get('service_level_percent'),
+        'formula_used': data.get('formula_used')
+    })
+
+
 # ==================== UPDATE Operations ====================
 
-def update_safety_stock(safety_stock_id: int, data: Dict, updated_by: str) -> Tuple[bool, str]:
+def update_safety_stock(
+    safety_stock_id: int, 
+    data: Dict, 
+    updated_by: str
+) -> Tuple[bool, str]:
     """
     Update existing safety stock record
     
@@ -323,7 +317,7 @@ def update_safety_stock(safety_stock_id: int, data: Dict, updated_by: str) -> Tu
         update_fields = []
         params = {'id': safety_stock_id, 'updated_by': updated_by}
         
-        # Fields that can be updated
+        # Updatable fields
         updatable_fields = [
             'safety_stock_qty', 'min_stock_qty', 'max_stock_qty',
             'reorder_point', 'reorder_qty', 'effective_from', 
@@ -338,61 +332,23 @@ def update_safety_stock(safety_stock_id: int, data: Dict, updated_by: str) -> Tu
         if not update_fields:
             return False, "No fields to update"
         
-        update_fields.append("updated_by = :updated_by")
-        update_fields.append("updated_date = NOW()")
-        
-        update_query = text(f"""
-        UPDATE safety_stock_levels 
-        SET {', '.join(update_fields)}
-        WHERE id = :id AND delete_flag = 0
-        """)
+        update_fields.extend(["updated_by = :updated_by", "updated_date = NOW()"])
         
         with engine.begin() as conn:
+            # Update main record
+            update_query = text(f"""
+            UPDATE safety_stock_levels 
+            SET {', '.join(update_fields)}
+            WHERE id = :id AND delete_flag = 0
+            """)
+            
             result = conn.execute(update_query, params)
             
             if result.rowcount == 0:
                 return False, "Record not found or already deleted"
             
-            # Update parameters if provided
-            if any(key in data for key in ['calculation_method', 'lead_time_days', 'safety_days', 
-                                           'service_level_percent', 'avg_daily_demand']):
-                
-                # Check if parameters record exists
-                check_query = text("""
-                SELECT id FROM safety_stock_parameters 
-                WHERE safety_stock_level_id = :ssl_id
-                """)
-                
-                param_exists = conn.execute(check_query, {'ssl_id': safety_stock_id}).fetchone()
-                
-                if param_exists:
-                    # Update existing parameters
-                    param_fields = []
-                    param_values = {'ssl_id': safety_stock_id}
-                    
-                    param_updatable = [
-                        'calculation_method', 'lead_time_days', 'lead_time_variability_days',
-                        'safety_days', 'review_period_days', 'demand_variability_factor',
-                        'demand_std_deviation', 'avg_daily_demand', 'service_level_percent',
-                        'z_score', 'historical_days', 'exclude_outliers', 'seasonality_adjusted',
-                        'calculation_notes', 'formula_used'
-                    ]
-                    
-                    for field in param_updatable:
-                        if field in data:
-                            param_fields.append(f"{field} = :{field}")
-                            param_values[field] = data[field]
-                    
-                    if param_fields:
-                        param_fields.append("last_calculated_date = NOW()")
-                        
-                        param_update_query = text(f"""
-                        UPDATE safety_stock_parameters 
-                        SET {', '.join(param_fields)}
-                        WHERE safety_stock_level_id = :ssl_id
-                        """)
-                        
-                        conn.execute(param_update_query, param_values)
+            # Update parameters if calculation method fields present
+            _update_parameters_if_needed(conn, safety_stock_id, data)
         
         logger.info(f"Updated safety stock record ID: {safety_stock_id}")
         return True, "Safety stock updated successfully"
@@ -400,6 +356,43 @@ def update_safety_stock(safety_stock_id: int, data: Dict, updated_by: str) -> Tu
     except Exception as e:
         logger.error(f"Error updating safety stock: {e}")
         return False, str(e)
+
+
+def _update_parameters_if_needed(conn, safety_stock_id: int, data: Dict):
+    """Helper to update calculation parameters if needed"""
+    param_fields = [
+        'calculation_method', 'lead_time_days', 'safety_days',
+        'service_level_percent', 'avg_daily_demand', 'demand_std_deviation'
+    ]
+    
+    if not any(field in data for field in param_fields):
+        return
+    
+    # Check if parameters exist
+    check_query = text("SELECT id FROM safety_stock_parameters WHERE safety_stock_level_id = :id")
+    exists = conn.execute(check_query, {'id': safety_stock_id}).fetchone()
+    
+    if exists:
+        # Update existing
+        update_fields = []
+        params = {'id': safety_stock_id}
+        
+        for field in param_fields:
+            if field in data:
+                update_fields.append(f"{field} = :{field}")
+                params[field] = data[field]
+        
+        if update_fields:
+            update_fields.append("last_calculated_date = NOW()")
+            update_query = text(f"""
+            UPDATE safety_stock_parameters 
+            SET {', '.join(update_fields)}
+            WHERE safety_stock_level_id = :id
+            """)
+            conn.execute(update_query, params)
+    else:
+        # Insert new parameters
+        _insert_parameters(conn, safety_stock_id, data)
 
 
 # ==================== DELETE Operations ====================
@@ -427,10 +420,7 @@ def delete_safety_stock(safety_stock_id: int, deleted_by: str) -> Tuple[bool, st
         """)
         
         with engine.begin() as conn:
-            result = conn.execute(query, {
-                'id': safety_stock_id,
-                'deleted_by': deleted_by
-            })
+            result = conn.execute(query, {'id': safety_stock_id, 'deleted_by': deleted_by})
             
             if result.rowcount == 0:
                 return False, "Record not found or already deleted"
@@ -445,7 +435,10 @@ def delete_safety_stock(safety_stock_id: int, deleted_by: str) -> Tuple[bool, st
 
 # ==================== BULK Operations ====================
 
-def bulk_create_safety_stock(data_list: List[Dict], created_by: str) -> Tuple[bool, str, Dict]:
+def bulk_create_safety_stock(
+    data_list: List[Dict], 
+    created_by: str
+) -> Tuple[bool, str, Dict]:
     """
     Bulk create safety stock records
     
@@ -458,11 +451,14 @@ def bulk_create_safety_stock(data_list: List[Dict], created_by: str) -> Tuple[bo
     """
     results = {'created': 0, 'failed': 0, 'errors': []}
     
+    if not data_list:
+        return False, "No data to import", results
+    
     try:
         engine = get_db_engine()
         
         with engine.begin() as conn:
-            for idx, data in enumerate(data_list):
+            for idx, data in enumerate(data_list, 1):
                 try:
                     # Prepare data with defaults
                     insert_data = {
@@ -506,7 +502,10 @@ def bulk_create_safety_stock(data_list: List[Dict], created_by: str) -> Tuple[bo
                     
                 except Exception as e:
                     results['failed'] += 1
-                    results['errors'].append(f"Row {idx + 1}: {str(e)}")
+                    results['errors'].append(f"Row {idx}: {str(e)}")
+                    if len(results['errors']) >= 50:  # Limit error messages
+                        results['errors'].append("... additional errors truncated")
+                        break
         
         if results['created'] > 0:
             logger.info(f"Bulk created {results['created']} safety stock records")
@@ -544,29 +543,19 @@ def create_safety_stock_review(
         INSERT INTO safety_stock_reviews (
             safety_stock_level_id, review_date, review_type,
             old_safety_stock_qty, new_safety_stock_qty,
-            avg_daily_demand, demand_std_deviation, demand_trend,
-            forecast_accuracy_percent,
-            stockout_incidents, stockout_quantity, stockout_days,
-            service_level_achieved,
-            excess_stock_days, avg_excess_quantity, holding_cost_usd,
-            inventory_turns, days_of_supply,
+            avg_daily_demand, stockout_incidents,
+            service_level_achieved, excess_stock_days,
+            inventory_turns, holding_cost_usd,
             action_taken, action_reason, review_notes,
-            system_recommendation, recommendation_accepted, override_reason,
-            next_review_date, review_frequency,
-            reviewed_by, approved_by
+            next_review_date, reviewed_by
         ) VALUES (
             :safety_stock_level_id, :review_date, :review_type,
             :old_safety_stock_qty, :new_safety_stock_qty,
-            :avg_daily_demand, :demand_std_deviation, :demand_trend,
-            :forecast_accuracy_percent,
-            :stockout_incidents, :stockout_quantity, :stockout_days,
-            :service_level_achieved,
-            :excess_stock_days, :avg_excess_quantity, :holding_cost_usd,
-            :inventory_turns, :days_of_supply,
+            :avg_daily_demand, :stockout_incidents,
+            :service_level_achieved, :excess_stock_days,
+            :inventory_turns, :holding_cost_usd,
             :action_taken, :action_reason, :review_notes,
-            :system_recommendation, :recommendation_accepted, :override_reason,
-            :next_review_date, :review_frequency,
-            :reviewed_by, :approved_by
+            :next_review_date, :reviewed_by
         )
         """)
         
@@ -578,28 +567,16 @@ def create_safety_stock_review(
                 'old_safety_stock_qty': review_data.get('old_safety_stock_qty'),
                 'new_safety_stock_qty': review_data.get('new_safety_stock_qty'),
                 'avg_daily_demand': review_data.get('avg_daily_demand'),
-                'demand_std_deviation': review_data.get('demand_std_deviation'),
-                'demand_trend': review_data.get('demand_trend'),
-                'forecast_accuracy_percent': review_data.get('forecast_accuracy_percent'),
                 'stockout_incidents': review_data.get('stockout_incidents'),
-                'stockout_quantity': review_data.get('stockout_quantity'),
-                'stockout_days': review_data.get('stockout_days'),
                 'service_level_achieved': review_data.get('service_level_achieved'),
                 'excess_stock_days': review_data.get('excess_stock_days'),
-                'avg_excess_quantity': review_data.get('avg_excess_quantity'),
-                'holding_cost_usd': review_data.get('holding_cost_usd'),
                 'inventory_turns': review_data.get('inventory_turns'),
-                'days_of_supply': review_data.get('days_of_supply'),
+                'holding_cost_usd': review_data.get('holding_cost_usd'),
                 'action_taken': review_data.get('action_taken'),
                 'action_reason': review_data.get('action_reason'),
                 'review_notes': review_data.get('review_notes'),
-                'system_recommendation': review_data.get('system_recommendation'),
-                'recommendation_accepted': review_data.get('recommendation_accepted'),
-                'override_reason': review_data.get('override_reason'),
                 'next_review_date': review_data.get('next_review_date'),
-                'review_frequency': review_data.get('review_frequency'),
-                'reviewed_by': reviewed_by,
-                'approved_by': review_data.get('approved_by')
+                'reviewed_by': reviewed_by
             })
         
         logger.info(f"Created review for safety stock ID: {safety_stock_id}")
@@ -637,12 +614,12 @@ def get_review_history(safety_stock_id: int) -> pd.DataFrame:
             reviewed_by,
             approved_by
         FROM safety_stock_reviews
-        WHERE safety_stock_level_id = :s_id
+        WHERE safety_stock_level_id = :id
         ORDER BY review_date DESC
         """)
         
         with engine.connect() as conn:
-            df = pd.read_sql(query, conn, params={'s_id': safety_stock_id})
+            df = pd.read_sql(query, conn, params={'id': safety_stock_id})
         
         return df
         

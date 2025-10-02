@@ -1,7 +1,7 @@
 # utils/safety_stock/crud.py
 """
 CRUD operations for Safety Stock Management
-Updated for simplified DB structure (no min/max stock)
+Version 2.1 - With role-based access control
 """
 
 import pandas as pd
@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 from sqlalchemy import text
 from ..db import get_db_engine
+from .permissions import filter_data_for_customer, get_user_role, log_action
 
 logger = logging.getLogger(__name__)
 
@@ -19,22 +20,24 @@ logger = logging.getLogger(__name__)
 def get_safety_stock_levels(
     entity_id: Optional[int] = None,
     customer_id: Optional[int] = None,
+    product_id: Optional[int] = None,
     product_search: Optional[str] = None,
     status: str = 'active',
     include_inactive: bool = False
 ) -> pd.DataFrame:
     """
-    Fetch safety stock levels with filters
+    Fetch safety stock levels with filters and permission filtering
     
     Args:
         entity_id: Filter by entity
         customer_id: Filter by customer (None for all, 'general' for NULL only)
+        product_id: Filter by specific product ID
         product_search: Search in product PT code or name
         status: Filter by status (active/all/expired/future)
         include_inactive: Include inactive records
     
     Returns:
-        DataFrame with safety stock data
+        DataFrame with safety stock data (filtered by permissions)
     """
     try:
         engine = get_db_engine()
@@ -57,7 +60,11 @@ def get_safety_stock_levels(
             conditions.append("s.customer_id = :customer_id")
             params['customer_id'] = customer_id
         
-        if product_search:
+        # Product filter - either by ID or search
+        if product_id:
+            conditions.append("s.product_id = :product_id")
+            params['product_id'] = product_id
+        elif product_search:
             conditions.append("(p.pt_code LIKE :search OR p.name LIKE :search)")
             params['search'] = f"%{product_search}%"
         
@@ -142,7 +149,10 @@ def get_safety_stock_levels(
         with engine.connect() as conn:
             df = pd.read_sql(query, conn, params=params)
         
-        logger.info(f"Fetched {len(df)} safety stock records")
+        # Apply permission-based filtering for customer role
+        df = filter_data_for_customer(df)
+        
+        logger.info(f"Fetched {len(df)} safety stock records (user: {get_user_role()})")
         return df
         
     except Exception as e:
@@ -168,6 +178,8 @@ def get_safety_stock_by_id(safety_stock_id: int) -> Optional[Dict]:
             s.*,
             p.pt_code,
             p.name as product_name,
+            e.english_name as entity_name,
+            c.english_name as customer_name,
             ssp.calculation_method,
             ssp.lead_time_days,
             ssp.safety_days,
@@ -178,6 +190,8 @@ def get_safety_stock_by_id(safety_stock_id: int) -> Optional[Dict]:
             ssp.formula_used
         FROM safety_stock_levels s
         LEFT JOIN products p ON s.product_id = p.id
+        LEFT JOIN companies e ON s.entity_id = e.id
+        LEFT JOIN companies c ON s.customer_id = c.id
         LEFT JOIN safety_stock_parameters ssp ON s.id = ssp.safety_stock_level_id
         WHERE s.id = :id AND s.delete_flag = 0
         """)
@@ -185,7 +199,21 @@ def get_safety_stock_by_id(safety_stock_id: int) -> Optional[Dict]:
         with engine.connect() as conn:
             result = conn.execute(query, {'id': safety_stock_id}).fetchone()
         
-        return dict(result._mapping) if result else None
+        if result:
+            data = dict(result._mapping)
+            
+            # Check if customer role can access this data
+            role = get_user_role()
+            if role == 'customer':
+                import streamlit as st
+                customer_id = st.session_state.get('customer_id')
+                if data.get('customer_id') != customer_id:
+                    logger.warning(f"Customer {customer_id} tried to access data for customer {data.get('customer_id')}")
+                    return None
+            
+            return data
+        
+        return None
         
     except Exception as e:
         logger.error(f"Error fetching safety stock by ID: {e}")
@@ -209,7 +237,7 @@ def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
         engine = get_db_engine()
         
         with engine.begin() as conn:
-            # Insert main record (removed min_stock_qty, max_stock_qty)
+            # Insert main record
             insert_query = text("""
             INSERT INTO safety_stock_levels (
                 product_id, entity_id, customer_id,
@@ -248,11 +276,14 @@ def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
             if data.get('calculation_method'):
                 _insert_parameters(conn, safety_stock_id, data)
         
-        logger.info(f"Created safety stock record ID: {safety_stock_id}")
+        # Log the action
+        log_action('CREATE', f"Created safety stock ID {safety_stock_id} for product {data['product_id']}")
+        logger.info(f"Created safety stock record ID: {safety_stock_id} by {created_by}")
+        
         return True, str(safety_stock_id)
         
     except Exception as e:
-        logger.error(f"Error creating safety stock: {e}")
+        logger.error(f"Error creating safety stock by {created_by}: {e}")
         return False, str(e)
 
 
@@ -307,7 +338,7 @@ def update_safety_stock(
     try:
         engine = get_db_engine()
         
-        # Build UPDATE statement dynamically (removed min_stock_qty, max_stock_qty)
+        # Build UPDATE statement dynamically
         update_fields = []
         params = {'id': safety_stock_id, 'updated_by': updated_by}
         
@@ -344,11 +375,14 @@ def update_safety_stock(
             # Update parameters if calculation method fields present
             _update_parameters_if_needed(conn, safety_stock_id, data)
         
-        logger.info(f"Updated safety stock record ID: {safety_stock_id}")
+        # Log the action
+        log_action('UPDATE', f"Updated safety stock ID {safety_stock_id}")
+        logger.info(f"Updated safety stock record ID: {safety_stock_id} by {updated_by}")
+        
         return True, "Safety stock updated successfully"
         
     except Exception as e:
-        logger.error(f"Error updating safety stock: {e}")
+        logger.error(f"Error updating safety stock by {updated_by}: {e}")
         return False, str(e)
 
 
@@ -419,11 +453,14 @@ def delete_safety_stock(safety_stock_id: int, deleted_by: str) -> Tuple[bool, st
             if result.rowcount == 0:
                 return False, "Record not found or already deleted"
         
-        logger.info(f"Deleted safety stock record ID: {safety_stock_id}")
+        # Log the action
+        log_action('DELETE', f"Deleted safety stock ID {safety_stock_id}")
+        logger.info(f"Deleted safety stock record ID: {safety_stock_id} by {deleted_by}")
+        
         return True, "Safety stock deleted successfully"
         
     except Exception as e:
-        logger.error(f"Error deleting safety stock: {e}")
+        logger.error(f"Error deleting safety stock by {deleted_by}: {e}")
         return False, str(e)
 
 
@@ -454,7 +491,7 @@ def bulk_create_safety_stock(
         with engine.begin() as conn:
             for idx, data in enumerate(data_list, 1):
                 try:
-                    # Prepare data with defaults (removed min/max stock)
+                    # Prepare data with defaults
                     insert_data = {
                         'product_id': data['product_id'],
                         'entity_id': data['entity_id'],
@@ -487,28 +524,40 @@ def bulk_create_safety_stock(
                     )
                     """)
                     
-                    conn.execute(insert_query, insert_data)
+                    result = conn.execute(insert_query, insert_data)
+                    
+                    # Add calculation parameters if provided
+                    if data.get('calculation_method'):
+                        safety_stock_id = result.lastrowid
+                        _insert_parameters(conn, safety_stock_id, data)
+                    
                     results['created'] += 1
                     
                 except Exception as e:
                     results['failed'] += 1
-                    results['errors'].append(f"Row {idx}: {str(e)}")
+                    error_msg = f"Row {idx}: {str(e)}"
+                    results['errors'].append(error_msg)
+                    logger.error(error_msg)
+                    
                     if len(results['errors']) >= 50:
                         results['errors'].append("... additional errors truncated")
                         break
         
         if results['created'] > 0:
-            logger.info(f"Bulk created {results['created']} safety stock records")
+            # Log the action
+            log_action('BULK_UPLOAD', f"Bulk created {results['created']} records")
+            logger.info(f"Bulk created {results['created']} safety stock records by {created_by}")
+            
             return True, f"Successfully created {results['created']} records", results
         else:
             return False, "No records were created", results
             
     except Exception as e:
-        logger.error(f"Error in bulk create: {e}")
+        logger.error(f"Error in bulk create by {created_by}: {e}")
         return False, str(e), results
 
 
-# ==================== Review Operations (SIMPLIFIED) ====================
+# ==================== Review Operations ====================
 
 def create_safety_stock_review(
     safety_stock_id: int,
@@ -516,7 +565,7 @@ def create_safety_stock_review(
     reviewed_by: str
 ) -> Tuple[bool, str]:
     """
-    Create a safety stock review record (simplified)
+    Create a safety stock review record
     
     Args:
         safety_stock_id: ID of safety stock level being reviewed
@@ -557,17 +606,23 @@ def create_safety_stock_review(
                 'approved_by': review_data.get('approved_by')
             })
         
-        logger.info(f"Created review for safety stock ID: {safety_stock_id}")
+        # Log the action
+        action_desc = f"Reviewed safety stock ID {safety_stock_id}"
+        if review_data.get('approved_by'):
+            action_desc += " (approved)"
+        log_action('REVIEW', action_desc)
+        
+        logger.info(f"Created review for safety stock ID: {safety_stock_id} by {reviewed_by}")
         return True, "Review created successfully"
         
     except Exception as e:
-        logger.error(f"Error creating review: {e}")
+        logger.error(f"Error creating review by {reviewed_by}: {e}")
         return False, str(e)
 
 
 def get_review_history(safety_stock_id: int) -> pd.DataFrame:
     """
-    Get review history for a safety stock record (simplified)
+    Get review history for a safety stock record
     
     Args:
         safety_stock_id: Safety stock level ID
@@ -604,3 +659,43 @@ def get_review_history(safety_stock_id: int) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error fetching review history: {e}")
         return pd.DataFrame()
+
+
+# ==================== Statistics Operations ====================
+
+def get_safety_stock_summary() -> Dict:
+    """
+    Get summary statistics for dashboard
+    
+    Returns:
+        Dictionary with summary statistics
+    """
+    try:
+        engine = get_db_engine()
+        
+        query = text("""
+        SELECT 
+            COUNT(DISTINCT s.id) as total_items,
+            COUNT(DISTINCT s.product_id) as unique_products,
+            COUNT(DISTINCT s.entity_id) as unique_entities,
+            COUNT(DISTINCT CASE WHEN s.customer_id IS NOT NULL THEN s.id END) as customer_rules,
+            COUNT(DISTINCT CASE WHEN s.customer_id IS NULL THEN s.id END) as general_rules,
+            AVG(s.safety_stock_qty) as avg_safety_stock,
+            SUM(s.safety_stock_qty) as total_safety_stock
+        FROM safety_stock_levels s
+        WHERE s.delete_flag = 0 
+        AND s.is_active = 1
+        AND CURRENT_DATE() >= s.effective_from
+        AND (s.effective_to IS NULL OR CURRENT_DATE() <= s.effective_to)
+        """)
+        
+        with engine.connect() as conn:
+            result = conn.execute(query).fetchone()
+        
+        if result:
+            return dict(result._mapping)
+        return {}
+        
+    except Exception as e:
+        logger.error(f"Error getting summary statistics: {e}")
+        return {}

@@ -1,8 +1,7 @@
 # pages/1_📦_Safety_Stock_Management.py
 """
 Safety Stock Management Main Page
-Version 2.0 - Updated for simplified DB structure
-Changes: Removed min/max stock, simplified reviews
+Version 2.1 - With Role-Based Access Control
 """
 
 import streamlit as st
@@ -35,6 +34,16 @@ from utils.safety_stock.export import (
     create_upload_template,
     generate_review_report
 )
+from utils.safety_stock.permissions import (
+    get_user_role,
+    has_permission,
+    filter_data_for_customer,
+    get_permission_message,
+    check_permission_and_show_error,
+    get_user_info_display,
+    apply_export_limit,
+    log_action
+)
 from sqlalchemy import text
 
 logger = logging.getLogger(__name__)
@@ -52,16 +61,151 @@ if not auth_manager.check_session():
     st.warning("Please login to access this page")
     st.stop()
 
+# Check basic view permission
+if not has_permission('view'):
+    st.error("You don't have permission to access this page")
+    st.stop()
+
 # Initialize session state
 if 'ss_filters' not in st.session_state:
     st.session_state.ss_filters = {
         'entity_id': None,
         'customer_id': None,
+        'product_id': None,
         'product_search': '',
         'status': 'active'
     }
 
 # ==================== Data Loading Functions ====================
+
+@st.cache_data(ttl=300)
+def load_existing_filter_options():
+    """Load filter options only from existing safety stock data"""
+    try:
+        engine = get_db_engine()
+        
+        # Get entities with safety stock data
+        entity_query = text("""
+        SELECT DISTINCT 
+            e.id,
+            e.company_code,
+            e.english_name
+        FROM safety_stock_levels s
+        JOIN companies e ON s.entity_id = e.id
+        WHERE s.delete_flag = 0 AND s.is_active = 1
+        ORDER BY e.company_code
+        """)
+        
+        # Get customers with safety stock data (including NULL for general rules)
+        customer_query = text("""
+        SELECT DISTINCT 
+            c.id,
+            c.company_code,
+            c.english_name
+        FROM safety_stock_levels s
+        LEFT JOIN companies c ON s.customer_id = c.id
+        WHERE s.delete_flag = 0 AND s.is_active = 1
+        AND s.customer_id IS NOT NULL
+        ORDER BY c.company_code
+        """)
+        
+        # Get products with safety stock data
+        product_query = text("""
+        SELECT DISTINCT 
+            p.id,
+            p.pt_code,
+            p.name,
+            p.package_size,
+            b.brand_name
+        FROM safety_stock_levels s
+        JOIN products p ON s.product_id = p.id
+        LEFT JOIN brands b ON p.brand_id = b.id
+        WHERE s.delete_flag = 0 AND s.is_active = 1
+        ORDER BY p.pt_code
+        """)
+        
+        # Get available statuses
+        status_query = text("""
+        SELECT DISTINCT
+            CASE 
+                WHEN CURRENT_DATE() >= s.effective_from 
+                    AND (s.effective_to IS NULL OR CURRENT_DATE() <= s.effective_to)
+                    AND s.is_active = 1
+                THEN 'Active'
+                WHEN CURRENT_DATE() < s.effective_from 
+                THEN 'Future'
+                WHEN s.effective_to IS NOT NULL AND CURRENT_DATE() > s.effective_to
+                THEN 'Expired'
+                ELSE 'Inactive'
+            END as status
+        FROM safety_stock_levels s
+        WHERE s.delete_flag = 0
+        ORDER BY status
+        """)
+        
+        with engine.connect() as conn:
+            entities_df = pd.read_sql(entity_query, conn)
+            customers_df = pd.read_sql(customer_query, conn)
+            products_df = pd.read_sql(product_query, conn)
+            status_df = pd.read_sql(status_query, conn)
+        
+        # Format display text
+        entities = (entities_df['company_code'] + ' - ' + entities_df['english_name']).tolist()
+        entity_ids = entities_df['id'].tolist()
+        
+        customers = []
+        customer_ids = []
+        if not customers_df.empty:
+            customers = (customers_df['company_code'] + ' - ' + customers_df['english_name']).tolist()
+            customer_ids = customers_df['id'].tolist()
+        
+        products = []
+        product_ids = []
+        if not products_df.empty:
+            # Format product display like in dialog
+            for _, row in products_df.iterrows():
+                pt_code = str(row['pt_code'])
+                name = str(row['name']) if pd.notna(row['name']) else ""
+                name = name[:35] + "..." if len(name) > 35 else name
+                pkg = str(row['package_size']) if pd.notna(row['package_size']) else ""
+                pkg = pkg[:20] + "..." if len(pkg) > 20 else pkg
+                brand = str(row['brand_name']) if pd.notna(row['brand_name']) else ""
+                
+                display = f"{pt_code} | {name}"
+                if pkg and brand:
+                    display += f" | {pkg} ({brand})"
+                elif pkg:
+                    display += f" | {pkg}"
+                elif brand:
+                    display += f" ({brand})"
+                
+                products.append(display)
+                product_ids.append(row['id'])
+        
+        # Get unique statuses
+        available_statuses = status_df['status'].unique().tolist() if not status_df.empty else ['Active']
+        
+        return {
+            'entities': entities,
+            'entity_ids': entity_ids,
+            'customers': customers,
+            'customer_ids': customer_ids,
+            'products': products,
+            'product_ids': product_ids,
+            'available_statuses': available_statuses
+        }
+        
+    except Exception as e:
+        logger.error(f"Error loading filter options: {e}")
+        return {
+            'entities': [],
+            'entity_ids': [],
+            'customers': [],
+            'customer_ids': [],
+            'products': [],
+            'product_ids': [],
+            'available_statuses': ['Active']
+        }
 
 @st.cache_data(ttl=300)
 def load_entities():
@@ -207,7 +351,13 @@ def safe_float(value, default=0.0):
 
 @st.dialog("Safety Stock Configuration", width="large")
 def safety_stock_form(mode='add', record_id=None):
-    """Add/Edit safety stock dialog - UPDATED: removed min/max stock"""
+    """Add/Edit safety stock dialog with permission check"""
+    
+    # Check permission
+    required_permission = 'create' if mode == 'add' else 'edit'
+    if not has_permission(required_permission):
+        st.error(get_permission_message(required_permission))
+        return
     
     existing_data = {}
     if mode == 'edit' and record_id:
@@ -322,7 +472,6 @@ def safety_stock_form(mode='add', record_id=None):
         )
     
     with tab2:
-        
         col1, col2 = st.columns(2)
         
         with col1:
@@ -379,7 +528,6 @@ def safety_stock_form(mode='add', record_id=None):
         if calculation_method == 'DAYS_OF_SUPPLY':
             col1, col2 = st.columns(2)
             with col1:
-                # Handle NULL/0 values by using default 14
                 safety_days_value = existing_data.get('safety_days')
                 if safety_days_value is None or safety_days_value == 0:
                     safety_days_value = 14
@@ -399,7 +547,6 @@ def safety_stock_form(mode='add', record_id=None):
         elif calculation_method == 'LEAD_TIME_BASED':
             col1, col2 = st.columns(2)
             with col1:
-                # Handle NULL/0 values by using default 7
                 lead_time_value = existing_data.get('lead_time_days')
                 if lead_time_value is None or lead_time_value == 0:
                     lead_time_value = 7
@@ -471,8 +618,10 @@ def safety_stock_form(mode='add', record_id=None):
             if is_valid:
                 if mode == 'add':
                     success, result = create_safety_stock(data, st.session_state.username)
+                    log_action('CREATE', f"Created safety stock for product {product_id}")
                 else:
                     success, result = update_safety_stock(record_id, data, st.session_state.username)
+                    log_action('UPDATE', f"Updated safety stock ID {record_id}")
                 
                 if success:
                     if 'calculated_safety_stock' in st.session_state:
@@ -492,14 +641,19 @@ def safety_stock_form(mode='add', record_id=None):
             st.rerun()
     
     with col3:
-        if mode == 'edit':
+        if mode == 'edit' and has_permission('review'):
             if st.button("Create Review", use_container_width=True):
                 review_dialog(record_id)
 
 
 @st.dialog("Review Safety Stock", width="large")
 def review_dialog(safety_stock_id):
-    """Review and adjust safety stock quantity ONLY - for regular users"""
+    """Review and adjust safety stock quantity - with permission check"""
+    
+    # Check permission
+    if not has_permission('review'):
+        st.error(get_permission_message('review'))
+        return
     
     current_data = get_safety_stock_by_id(safety_stock_id)
     if not current_data:
@@ -507,7 +661,7 @@ def review_dialog(safety_stock_id):
         return
     
     st.markdown("### 📋 Safety Stock Review")
-    st.info("ℹ️ Review process: Change quantity with documented reason. Use Edit for other changes.")
+    st.info("ℹ️ Review process: Change quantity with documented reason.")
     
     # Current context (read-only)
     st.subheader("Current Information")
@@ -537,7 +691,7 @@ def review_dialog(safety_stock_id):
     st.divider()
     st.subheader("Review Decision")
     
-    # Review form - ONLY quantity change
+    # Review form
     col1, col2 = st.columns(2)
     
     with col1:
@@ -586,16 +740,22 @@ def review_dialog(safety_stock_id):
         
         action_reason = st.text_area(
             "Reason for Change *",
-            help="⚠️ REQUIRED: Explain why this change is needed. This is the audit trail.",
+            help="⚠️ REQUIRED: Explain why this change is needed.",
             height=120,
-            placeholder="Example: Had 3 stockouts last month due to increased demand from new customer campaign..."
+            placeholder="Example: Had 3 stockouts last month due to increased demand..."
         )
+        
+        # Approval section - only for users with approve permission
+        if has_permission('approve'):
+            st.divider()
+            approve_review = st.checkbox("Approve this review")
+        else:
+            approve_review = False
     
     review_notes = st.text_area(
         "Additional Notes (Optional)",
-        help="Any additional context, observations, or action items",
-        height=80,
-        placeholder="Optional: Add any supporting information..."
+        help="Any additional context or observations",
+        height=80
     )
     
     st.divider()
@@ -623,7 +783,8 @@ def review_dialog(safety_stock_id):
                 'new_safety_stock_qty': new_safety_stock_qty,
                 'action_taken': action_taken,
                 'action_reason': action_reason.strip(),
-                'review_notes': review_notes.strip() if review_notes else None
+                'review_notes': review_notes.strip() if review_notes else None,
+                'approved_by': st.session_state.username if approve_review else None
             }
             
             # Create review record
@@ -639,11 +800,12 @@ def review_dialog(safety_stock_id):
                     update_data = {'safety_stock_qty': new_safety_stock_qty}
                     update_safety_stock(safety_stock_id, update_data, st.session_state.username)
                 
-                st.success("✅ Review submitted and quantity updated successfully!")
+                log_action('REVIEW', f"Reviewed safety stock ID {safety_stock_id}")
+                st.success("✅ Review submitted successfully!")
                 st.cache_data.clear()
                 st.rerun()
             else:
-                st.error(f"❌ Error: {message}")
+                st.error(f"⌛ Error: {message}")
     
     with col2:
         if st.button("Cancel", use_container_width=True):
@@ -652,7 +814,12 @@ def review_dialog(safety_stock_id):
 
 @st.dialog("Bulk Upload", width="large")
 def bulk_upload_dialog():
-    """Bulk upload safety stock data"""
+    """Bulk upload safety stock data - with permission check"""
+    
+    # Check permission
+    if not has_permission('bulk_upload'):
+        st.error(get_permission_message('bulk_upload'))
+        return
     
     st.markdown("### Bulk Upload Safety Stock")
     
@@ -702,6 +869,7 @@ def bulk_upload_dialog():
                         )
                     
                     if success:
+                        log_action('BULK_UPLOAD', f"Uploaded {results['created']} records")
                         st.success(message)
                         if results['failed'] > 0:
                             with st.expander("Errors"):
@@ -720,6 +888,11 @@ def bulk_upload_dialog():
 
 def main():
     st.title("📦 Safety Stock Management")
+    
+    # Display user info and role
+    col1, col2 = st.columns([3, 1])
+    with col2:
+        st.caption(get_user_info_display())
     
     # Stats
     stats = get_quick_stats()
@@ -741,52 +914,136 @@ def main():
         st.subheader("Filters")
         col1, col2, col3, col4 = st.columns(4)
         
+        # Load filter options from existing safety stock data
+        existing_filters = load_existing_filter_options()
+        
         with col1:
-            entities = load_entities()
-            entity_opts = ['All Entities'] + (entities['company_code'] + ' - ' + entities['english_name']).tolist()
-            selected_entity = st.selectbox("Entity", range(len(entity_opts)), format_func=lambda x: entity_opts[x])
-            st.session_state.ss_filters['entity_id'] = entities.iloc[selected_entity - 1]['id'] if selected_entity > 0 else None
+            # Entity filter - only show entities with safety stock data
+            entity_opts = ['All Entities'] + existing_filters['entities']
+            selected_entity = st.selectbox("Entity", entity_opts)
+            
+            if selected_entity == 'All Entities':
+                st.session_state.ss_filters['entity_id'] = None
+            else:
+                # Extract entity_id from the selected string
+                entity_id = existing_filters['entity_ids'][existing_filters['entities'].index(selected_entity)]
+                st.session_state.ss_filters['entity_id'] = entity_id
         
         with col2:
-            customers = load_customers()
-            customer_opts = ['All Customers', 'General Rules Only'] + (customers['company_code'] + ' - ' + customers['english_name']).tolist()
-            selected_customer = st.selectbox("Customer", range(len(customer_opts)), format_func=lambda x: customer_opts[x])
+            # Customer filter - only show customers with safety stock data
+            customer_opts = ['All Customers', 'General Rules Only'] + existing_filters['customers']
             
-            if selected_customer == 0:
+            # Filter for customer role
+            if get_user_role() == 'customer':
+                customer_id = st.session_state.get('customer_id')
+                if customer_id:
+                    # Only show their own customer option
+                    customer_name = next((c for c in existing_filters['customers'] 
+                                         if existing_filters['customer_ids'][existing_filters['customers'].index(c)] == customer_id), None)
+                    if customer_name:
+                        customer_opts = [customer_name]
+            
+            selected_customer = st.selectbox("Customer", customer_opts)
+            
+            if selected_customer == 'All Customers':
                 st.session_state.ss_filters['customer_id'] = None
-            elif selected_customer == 1:
+            elif selected_customer == 'General Rules Only':
                 st.session_state.ss_filters['customer_id'] = 'general'
             else:
-                st.session_state.ss_filters['customer_id'] = customers.iloc[selected_customer - 2]['id']
+                # Extract customer_id from the selected string
+                if selected_customer in existing_filters['customers']:
+                    customer_id = existing_filters['customer_ids'][existing_filters['customers'].index(selected_customer)]
+                    st.session_state.ss_filters['customer_id'] = customer_id
         
         with col3:
-            product_search = st.text_input("Product Search", placeholder="PT Code or Name", value=st.session_state.ss_filters['product_search'])
-            st.session_state.ss_filters['product_search'] = product_search
+            # Product filter - searchable dropdown like in dialog
+            product_opts = ['All Products'] + existing_filters['products']
+            
+            # Initialize product filter in session state
+            if 'product_filter' not in st.session_state:
+                st.session_state.product_filter = 'All Products'
+            
+            selected_product = st.selectbox(
+                "Product Search",
+                options=product_opts,
+                index=0,
+                placeholder="Select or type to search...",
+                help="Select product or type PT code/name to search"
+            )
+            
+            if selected_product == 'All Products':
+                st.session_state.ss_filters['product_id'] = None
+                st.session_state.ss_filters['product_search'] = ''
+            else:
+                # Extract product_id from the selected string
+                if selected_product in existing_filters['products']:
+                    product_id = existing_filters['product_ids'][existing_filters['products'].index(selected_product)]
+                    st.session_state.ss_filters['product_id'] = product_id
+                    st.session_state.ss_filters['product_search'] = ''
         
         with col4:
-            status = st.selectbox("Status", ['active', 'all', 'expired', 'future'], format_func=lambda x: x.title())
-            st.session_state.ss_filters['status'] = status
+            # Status filter - fixed options but properly ordered
+            status_options = {
+                'Active': 'active',
+                'All': 'all', 
+                'Expired': 'expired',
+                'Future': 'future'
+            }
+            
+            # Default to Active
+            default_index = 0
+            status_display = list(status_options.keys())
+            
+            selected_status = st.selectbox(
+                "Status",
+                options=status_display,
+                index=default_index,
+                help="Active: Currently effective | Expired: Past effective date | Future: Not yet effective | All: Show everything"
+            )
+            
+            st.session_state.ss_filters['status'] = status_options[selected_status]
     
-    # Actions
+    # Actions - with permission checking
     st.divider()
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        if st.button("Add Safety Stock", type="primary", use_container_width=True):
+        if st.button("Add Safety Stock", 
+                    type="primary", 
+                    use_container_width=True,
+                    disabled=not has_permission('create'),
+                    help=None if has_permission('create') else get_permission_message('create')):
             safety_stock_form('add')
     
     with col2:
-        if st.button("Bulk Upload", use_container_width=True):
+        if st.button("Bulk Upload", 
+                    use_container_width=True,
+                    disabled=not has_permission('bulk_upload'),
+                    help=None if has_permission('bulk_upload') else get_permission_message('bulk_upload')):
             bulk_upload_dialog()
     
     with col3:
         if st.button("Export Excel", use_container_width=True):
-            df = get_safety_stock_levels(
-                entity_id=st.session_state.ss_filters['entity_id'],
-                customer_id=None if st.session_state.ss_filters['customer_id'] == 'general' else st.session_state.ss_filters['customer_id'],
-                product_search=st.session_state.ss_filters['product_search'],
-                status=st.session_state.ss_filters['status']
-            )
+            # Build filters for export
+            export_filters = {
+                'entity_id': st.session_state.ss_filters['entity_id'],
+                'customer_id': None if st.session_state.ss_filters['customer_id'] == 'general' else st.session_state.ss_filters['customer_id'],
+                'status': st.session_state.ss_filters['status']
+            }
+            
+            # Add product filter if selected
+            if st.session_state.ss_filters.get('product_id'):
+                export_filters['product_id'] = st.session_state.ss_filters['product_id']
+            
+            df = get_safety_stock_levels(**export_filters)
+            
+            # Apply customer filter for customer role
+            df = filter_data_for_customer(df)
+            
+            # Apply export limit
+            df, was_limited = apply_export_limit(df)
+            if was_limited:
+                st.warning(f"Export limited to {len(df)} rows based on your role")
             
             if not df.empty:
                 excel_file = export_to_excel(df)
@@ -797,8 +1054,9 @@ def main():
                     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
+                log_action('EXPORT', f"Exported {len(df)} records")
             else:
-                st.warning("No data")
+                st.warning("No data to export")
     
     with col4:
         if st.button("Review Report", use_container_width=True):
@@ -819,17 +1077,28 @@ def main():
     # Data table
     st.divider()
     
-    df = get_safety_stock_levels(
-        entity_id=st.session_state.ss_filters['entity_id'],
-        customer_id=None if st.session_state.ss_filters['customer_id'] == 'general' else st.session_state.ss_filters['customer_id'],
-        product_search=st.session_state.ss_filters['product_search'],
-        status=st.session_state.ss_filters['status']
-    )
+    # Get filtered data
+    filters = {
+        'entity_id': st.session_state.ss_filters['entity_id'],
+        'customer_id': None if st.session_state.ss_filters['customer_id'] == 'general' else st.session_state.ss_filters['customer_id'],
+        'status': st.session_state.ss_filters['status']
+    }
+    
+    # Add product filter if selected
+    if st.session_state.ss_filters.get('product_id'):
+        filters['product_id'] = st.session_state.ss_filters['product_id']
+    elif st.session_state.ss_filters.get('product_search'):
+        filters['product_search'] = st.session_state.ss_filters['product_search']
+    
+    df = get_safety_stock_levels(**filters)
+    
+    # Apply customer filter for customer role
+    df = filter_data_for_customer(df)
     
     if df.empty:
         st.info("No records found")
     else:
-        # Updated display columns (removed min/max stock)
+        # Display columns
         display_cols = [
             'pt_code', 'product_name', 'entity_code', 'customer_code',
             'safety_stock_qty', 'reorder_point', 'reorder_qty',
@@ -860,11 +1129,17 @@ def main():
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                if st.button("Edit", use_container_width=True):
+                if st.button("Edit", 
+                           use_container_width=True,
+                           disabled=not has_permission('edit'),
+                           help=None if has_permission('edit') else get_permission_message('edit')):
                     safety_stock_form('edit', record['id'])
             
             with col2:
-                if st.button("Review", use_container_width=True):
+                if st.button("Review", 
+                           use_container_width=True,
+                           disabled=not has_permission('review'),
+                           help=None if has_permission('review') else get_permission_message('review')):
                     review_dialog(record['id'])
             
             with col3:
@@ -873,14 +1148,19 @@ def main():
                     if not history.empty:
                         st.dataframe(history, use_container_width=True)
                     else:
-                        st.info("No history")
+                        st.info("No review history")
             
             with col4:
-                if st.button("Delete", type="secondary", use_container_width=True):
+                if st.button("Delete", 
+                           type="secondary",
+                           use_container_width=True,
+                           disabled=not has_permission('delete'),
+                           help=None if has_permission('delete') else get_permission_message('delete')):
                     if st.checkbox("Confirm delete?"):
                         success, msg = delete_safety_stock(record['id'], st.session_state.username)
                         if success:
-                            st.success("Deleted")
+                            log_action('DELETE', f"Deleted safety stock ID {record['id']}")
+                            st.success("Deleted successfully")
                             st.cache_data.clear()
                             st.rerun()
                         else:

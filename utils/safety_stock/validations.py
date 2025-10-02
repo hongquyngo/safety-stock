@@ -1,7 +1,7 @@
 # utils/safety_stock/validations.py
 """
 Validation functions for Safety Stock Management
-Updated for simplified DB structure (no min/max stock, 3 methods only)
+Simplified and clean validation logic
 """
 
 import pandas as pd
@@ -14,152 +14,175 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def validate_quantities(data: Dict) -> Tuple[bool, List[str]]:
+def validate_safety_stock_data(
+    data: Dict,
+    mode: str = 'create',
+    exclude_id: Optional[int] = None
+) -> Tuple[bool, List[str]]:
     """
-    Validate quantity fields according to business rules
-    Simplified: no min/max stock validation
+    Master validation function for safety stock data
+    
+    Args:
+        data: Data dictionary to validate
+        mode: 'create' or 'edit'
+        exclude_id: ID to exclude when checking duplicates (for edit mode)
+    
+    Returns:
+        Tuple of (is_valid, list_of_errors)
     """
     errors = []
     
-    safety_stock = data.get('safety_stock_qty')
-    if safety_stock is None:
-        errors.append("Safety stock quantity is required")
-        return False, errors
+    # 1. Validate required fields
+    if mode == 'create':
+        required_fields = ['product_id', 'entity_id', 'safety_stock_qty', 'effective_from']
+        for field in required_fields:
+            if field not in data or data[field] is None:
+                errors.append(f"Missing required field: {field}")
     
-    if safety_stock < 0:
-        errors.append("Safety stock quantity cannot be negative")
+    # 2. Validate quantities
+    if 'safety_stock_qty' in data:
+        if data['safety_stock_qty'] < 0:
+            errors.append("Safety stock quantity cannot be negative")
+        elif data['safety_stock_qty'] > 999999:
+            errors.append("Safety stock quantity is unreasonably large (max: 999,999)")
     
-    reorder_point = data.get('reorder_point')
-    reorder_qty = data.get('reorder_qty')
-    
-    if reorder_point is not None:
-        if reorder_point < 0:
+    if 'reorder_point' in data and data['reorder_point'] is not None:
+        if data['reorder_point'] < 0:
             errors.append("Reorder point cannot be negative")
-        elif reorder_point < safety_stock:
-            errors.append("Reorder point should not be less than safety stock")
+        # Reorder point should be >= safety stock
+        if 'safety_stock_qty' in data and data['reorder_point'] < data['safety_stock_qty']:
+            errors.append("Reorder point should not be less than safety stock quantity")
     
-    if reorder_qty is not None and reorder_qty <= 0:
-        errors.append("Reorder quantity must be positive")
+    if 'reorder_qty' in data and data['reorder_qty'] is not None:
+        if data['reorder_qty'] <= 0:
+            errors.append("Reorder quantity must be positive")
     
-    return len(errors) == 0, errors
-
-
-def validate_dates(data: Dict) -> Tuple[bool, List[str]]:
-    """Validate date fields"""
-    errors = []
-    
-    effective_from = data.get('effective_from')
-    effective_to = data.get('effective_to')
-    
-    if not effective_from:
-        errors.append("Effective from date is required")
-        return False, errors
-    
-    if isinstance(effective_from, datetime):
-        effective_from = effective_from.date()
-    if isinstance(effective_to, datetime):
-        effective_to = effective_to.date()
-    
-    min_allowed_date = date(2020, 1, 1)
-    if effective_from < min_allowed_date:
-        errors.append(f"Effective from date cannot be before {min_allowed_date}")
-    
-    if effective_to:
-        if effective_to <= effective_from:
-            errors.append("Effective to date must be after effective from date")
-    
-    return len(errors) == 0, errors
-
-
-def validate_priority(priority_level: int, is_customer_specific: bool) -> Tuple[bool, List[str]]:
-    """Validate priority level"""
-    errors = []
-    
-    if priority_level < 0:
-        errors.append("Priority level cannot be negative")
-    elif priority_level > 9999:
-        errors.append("Priority level cannot exceed 9999")
-    elif is_customer_specific and priority_level > 500:
-        errors.append("Customer-specific rules should have priority level 500 or lower")
-    
-    return len(errors) == 0, errors
-
-
-def validate_calculation_parameters(method: str, params: Dict) -> Tuple[bool, List[str]]:
-    """
-    Validate parameters for calculation methods
-    3 methods only: FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED
-    """
-    errors = []
-    
-    # Validate method name
-    valid_methods = ['FIXED', 'DAYS_OF_SUPPLY', 'LEAD_TIME_BASED']
-    if method not in valid_methods:
-        errors.append(f"Invalid calculation method: {method}. Must be one of: {', '.join(valid_methods)}")
-        return False, errors
-    
-    if method == 'FIXED':
-        # No additional validation needed
-        pass
-    
-    elif method == 'DAYS_OF_SUPPLY':
-        if not params.get('safety_days'):
-            errors.append("Safety days is required for DAYS_OF_SUPPLY method")
-        elif params['safety_days'] <= 0:
-            errors.append("Safety days must be positive")
-        elif params['safety_days'] > 365:
-            errors.append("Safety days seems too high (>365 days)")
+    # 3. Validate dates
+    if 'effective_from' in data:
+        effective_from = data['effective_from']
+        if isinstance(effective_from, str):
+            try:
+                effective_from = datetime.strptime(effective_from, '%Y-%m-%d').date()
+            except ValueError:
+                errors.append("Invalid effective_from date format (use YYYY-MM-DD)")
         
-        # avg_daily_demand is optional (can be calculated from history)
-        if params.get('avg_daily_demand') is not None:
-            if params['avg_daily_demand'] < 0:
+        # Check minimum date
+        min_date = date(2020, 1, 1)
+        if effective_from and effective_from < min_date:
+            errors.append(f"Effective from date cannot be before {min_date}")
+    
+    if 'effective_to' in data and data['effective_to'] is not None:
+        effective_to = data['effective_to']
+        if isinstance(effective_to, str):
+            try:
+                effective_to = datetime.strptime(effective_to, '%Y-%m-%d').date()
+            except ValueError:
+                errors.append("Invalid effective_to date format (use YYYY-MM-DD)")
+        
+        # Check date range
+        if 'effective_from' in data and effective_to:
+            if isinstance(data['effective_from'], str):
+                effective_from = datetime.strptime(data['effective_from'], '%Y-%m-%d').date()
+            else:
+                effective_from = data['effective_from']
+            
+            if effective_to <= effective_from:
+                errors.append("Effective to date must be after effective from date")
+    
+    # 4. Validate priority
+    if 'priority_level' in data and data['priority_level'] is not None:
+        if data['priority_level'] < 1:
+            errors.append("Priority level must be at least 1")
+        elif data['priority_level'] > 9999:
+            errors.append("Priority level cannot exceed 9999")
+        
+        # Customer-specific rules should have lower priority number (higher priority)
+        if data.get('customer_id') and data['priority_level'] > 500:
+            errors.append("Customer-specific rules should have priority level 500 or lower")
+    
+    # 5. Validate calculation method parameters
+    if 'calculation_method' in data:
+        method_errors = validate_calculation_parameters(
+            data['calculation_method'],
+            data
+        )
+        errors.extend(method_errors)
+    
+    # 6. Check for existing duplicates
+    if mode == 'create' or (mode == 'edit' and 'product_id' in data):
+        duplicate_errors = check_for_duplicates(data, exclude_id)
+        errors.extend(duplicate_errors)
+    
+    return len(errors) == 0, errors
+
+
+def validate_calculation_parameters(method: str, data: Dict) -> List[str]:
+    """
+    Validate parameters for specific calculation method
+    
+    Args:
+        method: Calculation method (FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED)
+        data: Parameters dictionary
+    
+    Returns:
+        List of error messages
+    """
+    errors = []
+    
+    if method not in ['FIXED', 'DAYS_OF_SUPPLY', 'LEAD_TIME_BASED']:
+        errors.append(f"Invalid calculation method: {method}")
+        return errors
+    
+    if method == 'DAYS_OF_SUPPLY':
+        if 'safety_days' in data:
+            if data['safety_days'] is None or data['safety_days'] <= 0:
+                errors.append("Safety days must be positive for DAYS_OF_SUPPLY method")
+            elif data['safety_days'] > 365:
+                errors.append("Safety days seems too high (>365 days)")
+        
+        if 'avg_daily_demand' in data and data['avg_daily_demand'] is not None:
+            if data['avg_daily_demand'] < 0:
                 errors.append("Average daily demand cannot be negative")
     
     elif method == 'LEAD_TIME_BASED':
-        if not params.get('lead_time_days'):
-            errors.append("Lead time is required for LEAD_TIME_BASED method")
-        elif params['lead_time_days'] <= 0:
-            errors.append("Lead time must be positive")
-        elif params['lead_time_days'] > 365:
-            errors.append("Lead time seems too long (>365 days)")
+        if 'lead_time_days' in data:
+            if data['lead_time_days'] is None or data['lead_time_days'] <= 0:
+                errors.append("Lead time must be positive for LEAD_TIME_BASED method")
+            elif data['lead_time_days'] > 365:
+                errors.append("Lead time seems too long (>365 days)")
         
-        service_level = params.get('service_level_percent')
-        if not service_level:
-            errors.append("Service level is required for LEAD_TIME_BASED method")
-        elif service_level < 50 or service_level > 99.9:
-            errors.append("Service level must be between 50% and 99.9%")
+        if 'service_level_percent' in data:
+            if data['service_level_percent'] is None:
+                errors.append("Service level is required for LEAD_TIME_BASED method")
+            elif data['service_level_percent'] < 50 or data['service_level_percent'] > 99.9:
+                errors.append("Service level must be between 50% and 99.9%")
         
-        # demand_std_deviation is optional (can be calculated from history)
-        if params.get('demand_std_deviation') is not None:
-            if params['demand_std_deviation'] < 0:
+        if 'demand_std_deviation' in data and data['demand_std_deviation'] is not None:
+            if data['demand_std_deviation'] < 0:
                 errors.append("Demand standard deviation cannot be negative")
-        
-        # avg_daily_demand is optional
-        if params.get('avg_daily_demand') is not None:
-            if params['avg_daily_demand'] < 0:
-                errors.append("Average daily demand cannot be negative")
     
-    return len(errors) == 0, errors
+    return errors
 
 
-def check_date_overlap(
-    product_id: int,
-    entity_id: int,
-    customer_id: Optional[int],
-    effective_from: date,
-    effective_to: Optional[date],
-    exclude_id: Optional[int] = None
-) -> Tuple[bool, List[Dict]]:
-    """Check for overlapping date ranges for the same product/entity/customer"""
+def check_for_duplicates(data: Dict, exclude_id: Optional[int] = None) -> List[str]:
+    """
+    Check for duplicate/overlapping safety stock rules
+    
+    Args:
+        data: Data to check
+        exclude_id: ID to exclude (for updates)
+    
+    Returns:
+        List of error messages
+    """
+    errors = []
+    
     try:
         engine = get_db_engine()
         
+        # Check for exact duplicates
         query = text("""
-        SELECT 
-            id,
-            effective_from,
-            effective_to,
-            priority_level
+        SELECT COUNT(*) as count
         FROM safety_stock_levels
         WHERE product_id = :product_id
         AND entity_id = :entity_id
@@ -167,182 +190,75 @@ def check_date_overlap(
         AND delete_flag = 0
         AND is_active = 1
         AND id != :exclude_id
-        AND (
-            (:effective_to IS NULL AND (effective_to IS NULL OR effective_to >= :effective_from))
-            OR 
-            (:effective_to IS NOT NULL AND 
-             ((effective_from <= :effective_to) AND (effective_to IS NULL OR effective_to >= :effective_from)))
-        )
-        ORDER BY priority_level, effective_from
+        AND effective_from = :effective_from
         """)
+        
+        params = {
+            'product_id': data.get('product_id'),
+            'entity_id': data.get('entity_id'),
+            'customer_id': data.get('customer_id'),
+            'effective_from': data.get('effective_from'),
+            'exclude_id': exclude_id or -1
+        }
         
         with engine.connect() as conn:
-            result = conn.execute(query, {
-                'product_id': product_id,
-                'entity_id': entity_id,
-                'customer_id': customer_id,
-                'effective_from': effective_from,
-                'effective_to': effective_to,
-                'exclude_id': exclude_id or -1
-            }).fetchall()
-        
-        overlapping = [dict(row._mapping) for row in result]
-        return len(overlapping) > 0, overlapping
-        
-    except Exception as e:
-        logger.error(f"Error checking date overlap: {e}")
-        return False, []
-
-
-def validate_entity_product(
-    product_id: int,
-    entity_id: int
-) -> Tuple[bool, List[str]]:
-    """Validate that product exists and entity is Internal company"""
-    errors = []
-    
-    try:
-        engine = get_db_engine()
-        
-        product_query = text("""
-        SELECT id FROM products
-        WHERE id = :product_id AND delete_flag = 0
-        """)
-        
-        entity_query = text("""
-        SELECT c.id
-        FROM companies c
-        INNER JOIN companies_company_types cct ON c.id = cct.companies_id
-        INNER JOIN company_types ct ON cct.company_type_id = ct.id
-        WHERE c.id = :entity_id 
-        AND ct.name = 'Internal'
-        AND c.delete_flag = 0
-        """)
-        
-        with engine.connect() as conn:
-            product = conn.execute(product_query, {'product_id': product_id}).fetchone()
-            if not product:
-                errors.append(f"Product ID {product_id} not found")
+            result = conn.execute(query, params).fetchone()
             
-            entity = conn.execute(entity_query, {'entity_id': entity_id}).fetchone()
-            if not entity:
-                errors.append(f"Entity ID {entity_id} not found or not an Internal company")
+            if result and result.count > 0:
+                errors.append("A safety stock rule already exists for this product/entity/customer/date combination")
         
-    except Exception as e:
-        logger.error(f"Error validating entity/product: {e}")
-        errors.append(f"Validation error: {str(e)}")
-    
-    return len(errors) == 0, errors
-
-
-def validate_customer(customer_id: int) -> Tuple[bool, List[str]]:
-    """Validate that customer exists and is Customer type"""
-    errors = []
-    
-    try:
-        engine = get_db_engine()
-        
-        query = text("""
-        SELECT c.id
-        FROM companies c
-        INNER JOIN companies_company_types cct ON c.id = cct.companies_id
-        INNER JOIN company_types ct ON cct.company_type_id = ct.id
-        WHERE c.id = :customer_id
-        AND ct.name = 'Customer'
-        AND c.delete_flag = 0
-        """)
-        
-        with engine.connect() as conn:
-            customer = conn.execute(query, {'customer_id': customer_id}).fetchone()
-        
-        if not customer:
-            errors.append(f"Customer ID {customer_id} not found or not a Customer type")
-        
-    except Exception as e:
-        logger.error(f"Error validating customer: {e}")
-        errors.append(f"Validation error: {str(e)}")
-    
-    return len(errors) == 0, errors
-
-
-def validate_safety_stock_data(
-    data: Dict,
-    mode: str = 'create',
-    exclude_id: Optional[int] = None
-) -> Tuple[bool, List[str]]:
-    """
-    Master validation function
-    Updated for simplified structure (no min/max stock)
-    """
-    all_errors = []
-    
-    # Validate quantities (simplified)
-    valid, errors = validate_quantities(data)
-    if not valid:
-        all_errors.extend(errors)
-    
-    # Validate dates
-    valid, errors = validate_dates(data)
-    if not valid:
-        all_errors.extend(errors)
-    
-    # Validate priority if provided
-    if 'priority_level' in data:
-        valid, errors = validate_priority(
-            data['priority_level'],
-            bool(data.get('customer_id'))
-        )
-        if not valid:
-            all_errors.extend(errors)
-    
-    # For create mode, validate entity and product
-    if mode == 'create':
-        if data.get('product_id') and data.get('entity_id'):
-            valid, errors = validate_entity_product(
-                data['product_id'],
-                data['entity_id']
+        # Check for overlapping date ranges
+        if not errors:  # Only check overlaps if no exact duplicate
+            overlap_query = text("""
+            SELECT id, effective_from, effective_to
+            FROM safety_stock_levels
+            WHERE product_id = :product_id
+            AND entity_id = :entity_id
+            AND (customer_id = :customer_id OR (:customer_id IS NULL AND customer_id IS NULL))
+            AND delete_flag = 0
+            AND is_active = 1
+            AND id != :exclude_id
+            AND (
+                (:effective_to IS NULL AND (effective_to IS NULL OR effective_to >= :effective_from))
+                OR 
+                (:effective_to IS NOT NULL AND 
+                 ((effective_from <= :effective_to) AND (effective_to IS NULL OR effective_to >= :effective_from)))
             )
-            if not valid:
-                all_errors.extend(errors)
+            LIMIT 3
+            """)
+            
+            overlap_params = {
+                **params,
+                'effective_to': data.get('effective_to')
+            }
+            
+            result = conn.execute(overlap_query, overlap_params).fetchall()
+            
+            if result:
+                overlap_info = []
+                for row in result:
+                    date_range = f"{row.effective_from} to {row.effective_to or 'ongoing'}"
+                    overlap_info.append(f"ID {row.id} ({date_range})")
+                
+                errors.append(f"Date range overlaps with existing rules: {'; '.join(overlap_info[:3])}")
     
-    # Validate customer if provided
-    if data.get('customer_id'):
-        valid, errors = validate_customer(data['customer_id'])
-        if not valid:
-            all_errors.extend(errors)
+    except Exception as e:
+        logger.error(f"Error checking duplicates: {e}")
+        # Don't block on validation error, just log it
     
-    # Check for date overlaps
-    if all(key in data for key in ['product_id', 'entity_id', 'effective_from']):
-        has_overlap, overlapping = check_date_overlap(
-            data['product_id'],
-            data['entity_id'],
-            data.get('customer_id'),
-            data['effective_from'],
-            data.get('effective_to'),
-            exclude_id=exclude_id
-        )
-        
-        if has_overlap:
-            overlap_info = []
-            for rec in overlapping[:3]:
-                date_range = f"{rec['effective_from']} to {rec['effective_to'] or 'ongoing'}"
-                overlap_info.append(f"ID {rec['id']} ({date_range})")
-            all_errors.append(f"Date overlap with existing records: {'; '.join(overlap_info)}")
-    
-    # Validate calculation parameters if provided
-    if 'calculation_method' in data:
-        valid, errors = validate_calculation_parameters(
-            data['calculation_method'],
-            data
-        )
-        if not valid:
-            all_errors.extend(errors)
-    
-    return len(all_errors) == 0, all_errors
+    return errors
 
 
 def validate_bulk_data(df: pd.DataFrame) -> Tuple[bool, pd.DataFrame, List[str]]:
-    """Validate bulk import data"""
+    """
+    Validate bulk upload data
+    
+    Args:
+        df: DataFrame to validate
+    
+    Returns:
+        Tuple of (is_valid, cleaned_dataframe, error_list)
+    """
     errors = []
     validated_df = df.copy()
     
@@ -354,54 +270,56 @@ def validate_bulk_data(df: pd.DataFrame) -> Tuple[bool, pd.DataFrame, List[str]]
         errors.append(f"Missing required columns: {', '.join(missing_columns)}")
         return False, df, errors
     
-    # Validate each row
+    # Clean and validate each row
     row_errors = []
+    rows_to_drop = []
+    
     for idx, row in validated_df.iterrows():
         row_dict = row.to_dict()
         
-        # Clean up NaN values
+        # Remove NaN values
         row_dict = {k: v for k, v in row_dict.items() if pd.notna(v)}
         
-        # Validate using master validation function
-        valid, row_error_list = validate_safety_stock_data(row_dict, mode='create')
+        # Validate row
+        is_valid, row_error_list = validate_safety_stock_data(row_dict, mode='create')
         
-        if not valid:
-            row_errors.append(f"Row {idx + 1}: {'; '.join(row_error_list)}")
+        if not is_valid:
+            row_num = idx + 2  # +1 for 0-index, +1 for header row
+            row_errors.append(f"Row {row_num}: {'; '.join(row_error_list)}")
+            rows_to_drop.append(idx)
     
     # Add row errors to main error list
     if row_errors:
-        errors.extend(row_errors[:10])  # Limit to first 10 errors
-        if len(row_errors) > 10:
-            errors.append(f"... and {len(row_errors) - 10} more errors")
+        errors.extend(row_errors[:20])  # Limit to first 20 errors
+        if len(row_errors) > 20:
+            errors.append(f"... and {len(row_errors) - 20} more errors")
     
-    # Check for duplicates within the dataset
-    dup_columns = ['product_id', 'entity_id', 'customer_id', 'effective_from']
-    dup_columns = [col for col in dup_columns if col in df.columns]
-    
-    if dup_columns:
+    # Check for duplicates within the file
+    if 'product_id' in df.columns and 'entity_id' in df.columns:
+        dup_columns = ['product_id', 'entity_id', 'customer_id', 'effective_from']
+        dup_columns = [col for col in dup_columns if col in df.columns]
+        
         duplicates = validated_df[validated_df.duplicated(subset=dup_columns, keep=False)]
         if not duplicates.empty:
-            errors.append(f"Found {len(duplicates)} duplicate rows")
+            errors.append(f"Found {len(duplicates)} duplicate rows within the file")
+    
+    # Drop invalid rows if requested
+    if rows_to_drop:
+        validated_df = validated_df.drop(rows_to_drop)
+        errors.append(f"Removed {len(rows_to_drop)} invalid rows")
     
     return len(errors) == 0, validated_df, errors
 
 
-def get_validation_summary(errors: List[str]) -> str:
-    """Format validation errors for display"""
-    if not errors:
-        return "All validations passed"
-    
-    summary = f"Found {len(errors)} validation error(s):\n"
-    for i, error in enumerate(errors, 1):
-        summary += f"{i}. {error}\n"
-    
-    return summary
-
-
 def validate_review_data(review_data: Dict) -> Tuple[bool, List[str]]:
     """
-    Validate review data (simplified)
-    Only validates core fields needed for change tracking
+    Validate review data
+    
+    Args:
+        review_data: Review data dictionary
+    
+    Returns:
+        Tuple of (is_valid, error_list)
     """
     errors = []
     
@@ -415,31 +333,58 @@ def validate_review_data(review_data: Dict) -> Tuple[bool, List[str]]:
     if not review_data.get('action_taken'):
         errors.append("Action taken is required")
     
+    if not review_data.get('action_reason'):
+        errors.append("Reason for change is required")
+    elif len(review_data['action_reason'].strip()) < 10:
+        errors.append("Reason for change must be at least 10 characters")
+    
+    # Validate action consistency
+    if all(key in review_data for key in ['old_safety_stock_qty', 'new_safety_stock_qty', 'action_taken']):
+        old_qty = review_data['old_safety_stock_qty']
+        new_qty = review_data['new_safety_stock_qty']
+        action = review_data['action_taken']
+        
+        if action == 'INCREASED' and new_qty <= old_qty:
+            errors.append("Action is INCREASED but new quantity is not greater")
+        elif action == 'DECREASED' and new_qty >= old_qty:
+            errors.append("Action is DECREASED but new quantity is not less")
+        elif action == 'NO_CHANGE' and new_qty != old_qty:
+            errors.append("Action is NO_CHANGE but quantities are different")
+    
     # Validate action_taken value
     valid_actions = ['INCREASED', 'DECREASED', 'NO_CHANGE', 'METHOD_CHANGED']
     if review_data.get('action_taken') and review_data['action_taken'] not in valid_actions:
         errors.append(f"Invalid action. Must be one of: {', '.join(valid_actions)}")
     
-    # Validate quantities are positive
-    if review_data.get('old_safety_stock_qty') is not None:
-        if review_data['old_safety_stock_qty'] < 0:
-            errors.append("Old safety stock quantity cannot be negative")
-    
-    if review_data.get('new_safety_stock_qty') is not None:
-        if review_data['new_safety_stock_qty'] < 0:
-            errors.append("New safety stock quantity cannot be negative")
-    
-    # Validate consistency between quantities and action
-    old_qty = review_data.get('old_safety_stock_qty')
-    new_qty = review_data.get('new_safety_stock_qty')
-    action = review_data.get('action_taken')
-    
-    if old_qty is not None and new_qty is not None and action:
-        if action == 'INCREASED' and new_qty <= old_qty:
-            errors.append("Action is INCREASED but new quantity is not greater than old quantity")
-        elif action == 'DECREASED' and new_qty >= old_qty:
-            errors.append("Action is DECREASED but new quantity is not less than old quantity")
-        elif action == 'NO_CHANGE' and new_qty != old_qty:
-            errors.append("Action is NO_CHANGE but quantities are different")
+    # Validate review_type
+    valid_review_types = ['PERIODIC', 'EXCEPTION', 'EMERGENCY', 'ANNUAL']
+    if review_data.get('review_type') and review_data['review_type'] not in valid_review_types:
+        errors.append(f"Invalid review type. Must be one of: {', '.join(valid_review_types)}")
     
     return len(errors) == 0, errors
+
+
+def get_validation_summary(errors: List[str]) -> str:
+    """
+    Format validation errors for display
+    
+    Args:
+        errors: List of error messages
+    
+    Returns:
+        Formatted error summary
+    """
+    if not errors:
+        return "All validations passed"
+    
+    if len(errors) == 1:
+        return f"Validation error: {errors[0]}"
+    
+    summary = f"Found {len(errors)} validation errors:\n"
+    for i, error in enumerate(errors[:10], 1):  # Show max 10 errors
+        summary += f"{i}. {error}\n"
+    
+    if len(errors) > 10:
+        summary += f"... and {len(errors) - 10} more errors"
+    
+    return summary

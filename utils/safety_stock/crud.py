@@ -1,6 +1,7 @@
 # utils/safety_stock/crud.py
 """
 CRUD operations for Safety Stock Management
+Updated for simplified DB structure (no min/max stock)
 """
 
 import pandas as pd
@@ -90,8 +91,6 @@ def get_safety_stock_levels(
             c.company_code as customer_code,
             
             s.safety_stock_qty,
-            s.min_stock_qty,
-            s.max_stock_qty,
             s.reorder_point,
             s.reorder_qty,
             
@@ -171,7 +170,6 @@ def get_safety_stock_by_id(safety_stock_id: int) -> Optional[Dict]:
             p.name as product_name,
             ssp.calculation_method,
             ssp.lead_time_days,
-            ssp.lead_time_variability_days,
             ssp.safety_days,
             ssp.demand_std_deviation,
             ssp.avg_daily_demand,
@@ -211,19 +209,17 @@ def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
         engine = get_db_engine()
         
         with engine.begin() as conn:
-            # Insert main record
+            # Insert main record (removed min_stock_qty, max_stock_qty)
             insert_query = text("""
             INSERT INTO safety_stock_levels (
                 product_id, entity_id, customer_id,
-                safety_stock_qty, min_stock_qty, max_stock_qty,
-                reorder_point, reorder_qty,
+                safety_stock_qty, reorder_point, reorder_qty,
                 effective_from, effective_to, is_active,
                 priority_level, business_notes,
                 created_by, updated_by
             ) VALUES (
                 :product_id, :entity_id, :customer_id,
-                :safety_stock_qty, :min_stock_qty, :max_stock_qty,
-                :reorder_point, :reorder_qty,
+                :safety_stock_qty, :reorder_point, :reorder_qty,
                 :effective_from, :effective_to, :is_active,
                 :priority_level, :business_notes,
                 :created_by, :updated_by
@@ -235,8 +231,6 @@ def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
                 'entity_id': data['entity_id'],
                 'customer_id': data.get('customer_id'),
                 'safety_stock_qty': data['safety_stock_qty'],
-                'min_stock_qty': data.get('min_stock_qty'),
-                'max_stock_qty': data.get('max_stock_qty'),
                 'reorder_point': data.get('reorder_point'),
                 'reorder_qty': data.get('reorder_qty'),
                 'effective_from': data['effective_from'],
@@ -313,15 +307,15 @@ def update_safety_stock(
     try:
         engine = get_db_engine()
         
-        # Build UPDATE statement dynamically
+        # Build UPDATE statement dynamically (removed min_stock_qty, max_stock_qty)
         update_fields = []
         params = {'id': safety_stock_id, 'updated_by': updated_by}
         
         # Updatable fields
         updatable_fields = [
-            'safety_stock_qty', 'min_stock_qty', 'max_stock_qty',
-            'reorder_point', 'reorder_qty', 'effective_from', 
-            'effective_to', 'is_active', 'priority_level', 'business_notes'
+            'safety_stock_qty', 'reorder_point', 'reorder_qty',
+            'effective_from', 'effective_to', 'is_active', 
+            'priority_level', 'business_notes'
         ]
         
         for field in updatable_fields:
@@ -460,14 +454,12 @@ def bulk_create_safety_stock(
         with engine.begin() as conn:
             for idx, data in enumerate(data_list, 1):
                 try:
-                    # Prepare data with defaults
+                    # Prepare data with defaults (removed min/max stock)
                     insert_data = {
                         'product_id': data['product_id'],
                         'entity_id': data['entity_id'],
                         'customer_id': data.get('customer_id'),
                         'safety_stock_qty': data['safety_stock_qty'],
-                        'min_stock_qty': data.get('min_stock_qty'),
-                        'max_stock_qty': data.get('max_stock_qty'),
                         'reorder_point': data.get('reorder_point'),
                         'reorder_qty': data.get('reorder_qty'),
                         'effective_from': data.get('effective_from', datetime.now().date()),
@@ -482,15 +474,13 @@ def bulk_create_safety_stock(
                     insert_query = text("""
                     INSERT INTO safety_stock_levels (
                         product_id, entity_id, customer_id,
-                        safety_stock_qty, min_stock_qty, max_stock_qty,
-                        reorder_point, reorder_qty,
+                        safety_stock_qty, reorder_point, reorder_qty,
                         effective_from, effective_to, is_active,
                         priority_level, business_notes,
                         created_by, updated_by
                     ) VALUES (
                         :product_id, :entity_id, :customer_id,
-                        :safety_stock_qty, :min_stock_qty, :max_stock_qty,
-                        :reorder_point, :reorder_qty,
+                        :safety_stock_qty, :reorder_point, :reorder_qty,
                         :effective_from, :effective_to, :is_active,
                         :priority_level, :business_notes,
                         :created_by, :updated_by
@@ -503,7 +493,7 @@ def bulk_create_safety_stock(
                 except Exception as e:
                     results['failed'] += 1
                     results['errors'].append(f"Row {idx}: {str(e)}")
-                    if len(results['errors']) >= 50:  # Limit error messages
+                    if len(results['errors']) >= 50:
                         results['errors'].append("... additional errors truncated")
                         break
         
@@ -518,7 +508,7 @@ def bulk_create_safety_stock(
         return False, str(e), results
 
 
-# ==================== Review Operations ====================
+# ==================== Review Operations (SIMPLIFIED) ====================
 
 def create_safety_stock_review(
     safety_stock_id: int,
@@ -526,7 +516,7 @@ def create_safety_stock_review(
     reviewed_by: str
 ) -> Tuple[bool, str]:
     """
-    Create a safety stock review record
+    Create a safety stock review record (simplified)
     
     Args:
         safety_stock_id: ID of safety stock level being reviewed
@@ -543,19 +533,13 @@ def create_safety_stock_review(
         INSERT INTO safety_stock_reviews (
             safety_stock_level_id, review_date, review_type,
             old_safety_stock_qty, new_safety_stock_qty,
-            avg_daily_demand, stockout_incidents,
-            service_level_achieved, excess_stock_days,
-            inventory_turns, holding_cost_usd,
             action_taken, action_reason, review_notes,
-            next_review_date, reviewed_by
+            reviewed_by, approved_by
         ) VALUES (
             :safety_stock_level_id, :review_date, :review_type,
             :old_safety_stock_qty, :new_safety_stock_qty,
-            :avg_daily_demand, :stockout_incidents,
-            :service_level_achieved, :excess_stock_days,
-            :inventory_turns, :holding_cost_usd,
             :action_taken, :action_reason, :review_notes,
-            :next_review_date, :reviewed_by
+            :reviewed_by, :approved_by
         )
         """)
         
@@ -566,17 +550,11 @@ def create_safety_stock_review(
                 'review_type': review_data.get('review_type', 'PERIODIC'),
                 'old_safety_stock_qty': review_data.get('old_safety_stock_qty'),
                 'new_safety_stock_qty': review_data.get('new_safety_stock_qty'),
-                'avg_daily_demand': review_data.get('avg_daily_demand'),
-                'stockout_incidents': review_data.get('stockout_incidents'),
-                'service_level_achieved': review_data.get('service_level_achieved'),
-                'excess_stock_days': review_data.get('excess_stock_days'),
-                'inventory_turns': review_data.get('inventory_turns'),
-                'holding_cost_usd': review_data.get('holding_cost_usd'),
                 'action_taken': review_data.get('action_taken'),
                 'action_reason': review_data.get('action_reason'),
                 'review_notes': review_data.get('review_notes'),
-                'next_review_date': review_data.get('next_review_date'),
-                'reviewed_by': reviewed_by
+                'reviewed_by': reviewed_by,
+                'approved_by': review_data.get('approved_by')
             })
         
         logger.info(f"Created review for safety stock ID: {safety_stock_id}")
@@ -589,7 +567,7 @@ def create_safety_stock_review(
 
 def get_review_history(safety_stock_id: int) -> pd.DataFrame:
     """
-    Get review history for a safety stock record
+    Get review history for a safety stock record (simplified)
     
     Args:
         safety_stock_id: Safety stock level ID
@@ -609,10 +587,10 @@ def get_review_history(safety_stock_id: int) -> pd.DataFrame:
             change_percentage,
             action_taken,
             action_reason,
-            service_level_achieved,
-            stockout_incidents,
+            review_notes,
             reviewed_by,
-            approved_by
+            approved_by,
+            created_date
         FROM safety_stock_reviews
         WHERE safety_stock_level_id = :id
         ORDER BY review_date DESC

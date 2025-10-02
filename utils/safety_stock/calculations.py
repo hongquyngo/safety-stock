@@ -1,7 +1,8 @@
 # utils/safety_stock/calculations.py
 """
 Safety Stock Calculation Methods
-Implements various calculation methods for determining optimal safety stock levels
+Updated: Only 3 methods - FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED
+Removed: DEMAND_PERCENTAGE, MIN_MAX, STATISTICAL
 """
 
 import math
@@ -135,7 +136,7 @@ def get_historical_demand(
             Q1 = df['daily_demand'].quantile(0.25)
             Q3 = df['daily_demand'].quantile(0.75)
             IQR = Q3 - Q1
-            lower_bound = max(0, Q1 - 1.5 * IQR)  # Demand can't be negative
+            lower_bound = max(0, Q1 - 1.5 * IQR)
             upper_bound = Q3 + 1.5 * IQR
             df = df[(df['daily_demand'] >= lower_bound) & 
                    (df['daily_demand'] <= upper_bound)]
@@ -159,10 +160,18 @@ def get_historical_demand(
         return default_stats
 
 
-# ==================== Calculation Methods ====================
+# ==================== Calculation Methods (3 only) ====================
 
 def calculate_fixed(safety_stock_qty: float, **kwargs) -> Dict:
-    """FIXED method - Manual input, no calculation"""
+    """
+    FIXED method - Manual input, no calculation
+    
+    Args:
+        safety_stock_qty: Manually specified safety stock quantity
+    
+    Returns:
+        Dictionary with calculation results
+    """
     return {
         'method': 'FIXED',
         'safety_stock_qty': safety_stock_qty,
@@ -178,7 +187,18 @@ def calculate_days_of_supply(
     entity_id: int = None,
     **kwargs
 ) -> Dict:
-    """DAYS_OF_SUPPLY method - safety_days × average_daily_demand"""
+    """
+    DAYS_OF_SUPPLY method - safety_days × average_daily_demand
+    
+    Args:
+        safety_days: Number of days to cover
+        avg_daily_demand: Average daily demand (optional, will be calculated if not provided)
+        product_id: Product ID (for calculating demand)
+        entity_id: Entity ID (for calculating demand)
+    
+    Returns:
+        Dictionary with calculation results
+    """
     
     # Calculate from history if not provided
     if avg_daily_demand == 0 and product_id and entity_id:
@@ -204,47 +224,11 @@ def calculate_days_of_supply(
     }
 
 
-def calculate_demand_percentage(
-    demand_percentage: float,
-    avg_period_demand: float = 0,
-    period_days: int = 30,
-    product_id: int = None,
-    entity_id: int = None,
-    **kwargs
-) -> Dict:
-    """DEMAND_PERCENTAGE method - percentage × average_period_demand"""
-    
-    # Calculate from history if not provided
-    if avg_period_demand == 0 and product_id and entity_id:
-        demand_stats = get_historical_demand(
-            product_id,
-            entity_id,
-            kwargs.get('customer_id'),
-            kwargs.get('historical_days', 90)
-        )
-        avg_period_demand = demand_stats['avg_daily_demand'] * period_days
-    
-    safety_stock_qty = (demand_percentage / 100) * avg_period_demand
-    
-    return {
-        'method': 'DEMAND_PERCENTAGE',
-        'safety_stock_qty': round(safety_stock_qty, 2),
-        'formula_used': f'SS = {demand_percentage}% × {avg_period_demand:.2f} units',
-        'calculation_notes': f'Maintains {demand_percentage}% of {period_days}-day demand',
-        'parameters': {
-            'demand_percentage': demand_percentage,
-            'avg_period_demand': avg_period_demand,
-            'period_days': period_days
-        }
-    }
-
-
 def calculate_lead_time_based(
     lead_time_days: int,
     service_level_percent: float,
     demand_std_deviation: float = None,
     avg_daily_demand: float = None,
-    lead_time_variability: int = 0,
     product_id: int = None,
     entity_id: int = None,
     **kwargs
@@ -252,6 +236,17 @@ def calculate_lead_time_based(
     """
     LEAD_TIME_BASED method - Statistical safety stock calculation
     Formula: Z-score × √lead_time × demand_std_deviation
+    
+    Args:
+        lead_time_days: Lead time in days
+        service_level_percent: Target service level (90, 95, 98, 99)
+        demand_std_deviation: Standard deviation of demand (optional)
+        avg_daily_demand: Average daily demand (optional)
+        product_id: Product ID (for calculating from history)
+        entity_id: Entity ID (for calculating from history)
+    
+    Returns:
+        Dictionary with calculation results
     """
     
     # Get demand statistics if not provided
@@ -272,18 +267,10 @@ def calculate_lead_time_based(
     # Get Z-score for service level
     z_score = get_z_score(service_level_percent)
     
-    # Calculate safety stock
-    if lead_time_variability > 0 and avg_daily_demand > 0:
-        # Account for both demand and lead time variability
-        variance_demand = lead_time_days * (demand_std_deviation ** 2)
-        variance_lead = (avg_daily_demand ** 2) * (lead_time_variability ** 2)
-        combined_std = math.sqrt(variance_demand + variance_lead)
-        safety_stock_qty = z_score * combined_std
-        formula = f'SS = {z_score:.2f} × √(LT×σ_D² + D²×σ_LT²)'
-    else:
-        # Simple formula without lead time variability
-        safety_stock_qty = z_score * math.sqrt(lead_time_days) * demand_std_deviation
-        formula = f'SS = {z_score:.2f} × √{lead_time_days} × {demand_std_deviation:.2f}'
+    # Calculate safety stock: Z × √LT × σ_demand
+    safety_stock_qty = z_score * math.sqrt(lead_time_days) * demand_std_deviation
+    
+    formula = f'SS = {z_score:.2f} × √{lead_time_days} × {demand_std_deviation:.2f}'
     
     return {
         'method': 'LEAD_TIME_BASED',
@@ -300,117 +287,12 @@ def calculate_lead_time_based(
     }
 
 
-def calculate_min_max(
-    min_stock_qty: float,
-    max_stock_qty: float,
-    **kwargs
-) -> Dict:
-    """MIN_MAX method - Safety stock equals minimum level"""
-    
-    safety_stock_qty = min_stock_qty
-    reorder_qty = max_stock_qty - min_stock_qty
-    
-    return {
-        'method': 'MIN_MAX',
-        'safety_stock_qty': round(safety_stock_qty, 2),
-        'min_stock_qty': min_stock_qty,
-        'max_stock_qty': max_stock_qty,
-        'reorder_point': min_stock_qty,
-        'reorder_qty': round(reorder_qty, 2),
-        'formula_used': f'Safety Stock = Min Level ({min_stock_qty})',
-        'calculation_notes': f'Min-Max system: Reorder at {min_stock_qty}, up to {max_stock_qty}'
-    }
-
-
-def calculate_statistical(
-    product_id: int,
-    entity_id: int,
-    service_level_percent: float = 95.0,
-    lead_time_days: int = 7,
-    review_period_days: int = 7,
-    historical_days: int = 180,
-    **kwargs
-) -> Dict:
-    """
-    STATISTICAL method - Advanced model with protection period
-    Uses lead time + review period for comprehensive coverage
-    """
-    
-    # Get historical demand
-    demand_stats = get_historical_demand(
-        product_id,
-        entity_id,
-        kwargs.get('customer_id'),
-        historical_days,
-        exclude_outliers=True
-    )
-    
-    # Check data sufficiency
-    if demand_stats['data_points'] < 30:
-        # Fall back to simpler method
-        return calculate_lead_time_based(
-            lead_time_days=lead_time_days,
-            service_level_percent=service_level_percent,
-            demand_std_deviation=demand_stats['std_deviation'],
-            avg_daily_demand=demand_stats['avg_daily_demand'],
-            product_id=product_id,
-            entity_id=entity_id
-        )
-    
-    # Calculate protection period
-    protection_period = lead_time_days + review_period_days
-    
-    # Get Z-score
-    z_score = get_z_score(service_level_percent)
-    
-    # Calculate demand during protection period
-    avg_demand_protection = demand_stats['avg_daily_demand'] * protection_period
-    
-    # Calculate standard deviation during protection period
-    std_dev_protection = demand_stats['std_deviation'] * math.sqrt(protection_period)
-    
-    # Calculate safety stock
-    safety_stock_qty = z_score * std_dev_protection
-    
-    # Calculate reorder point
-    reorder_point = avg_demand_protection + safety_stock_qty
-    
-    # Simple EOQ calculation
-    annual_demand = demand_stats['avg_daily_demand'] * 365
-    holding_cost_rate = kwargs.get('holding_cost_percent', 20) / 100
-    ordering_cost = kwargs.get('ordering_cost', 50)
-    
-    if annual_demand > 0 and holding_cost_rate > 0:
-        eoq = math.sqrt((2 * annual_demand * ordering_cost) / holding_cost_rate)
-    else:
-        eoq = demand_stats['avg_daily_demand'] * 30
-    
-    return {
-        'method': 'STATISTICAL',
-        'safety_stock_qty': round(safety_stock_qty, 2),
-        'reorder_point': round(reorder_point, 2),
-        'reorder_qty': round(eoq, 2),
-        'formula_used': f'SS = {z_score:.2f} × {std_dev_protection:.2f}',
-        'calculation_notes': f'Protection period: {protection_period} days, Service level: {service_level_percent}%',
-        'parameters': {
-            'service_level_percent': service_level_percent,
-            'z_score': z_score,
-            'lead_time_days': lead_time_days,
-            'review_period_days': review_period_days,
-            'protection_period': protection_period,
-            'avg_daily_demand': demand_stats['avg_daily_demand'],
-            'std_deviation': demand_stats['std_deviation'],
-            'cv': demand_stats['coefficient_variation']
-        }
-    }
-
-
 def calculate_safety_stock(method: str, **params) -> Dict:
     """
-    Main calculation router
+    Main calculation router - supports 3 methods only
     
     Args:
-        method: Calculation method name
+        method: Calculation method name (FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED)
         **params: Method-specific parameters
     
     Returns:
@@ -419,17 +301,14 @@ def calculate_safety_stock(method: str, **params) -> Dict:
     method_map = {
         'FIXED': calculate_fixed,
         'DAYS_OF_SUPPLY': calculate_days_of_supply,
-        'DEMAND_PERCENTAGE': calculate_demand_percentage,
-        'LEAD_TIME_BASED': calculate_lead_time_based,
-        'MIN_MAX': calculate_min_max,
-        'STATISTICAL': calculate_statistical
+        'LEAD_TIME_BASED': calculate_lead_time_based
     }
     
     if method not in method_map:
         return {
             'method': method,
             'safety_stock_qty': 0,
-            'error': f'Unknown calculation method: {method}'
+            'error': f'Unknown calculation method: {method}. Must be one of: FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED'
         }
     
     try:
@@ -453,6 +332,7 @@ def recommend_method(
 ) -> str:
     """
     Recommend best calculation method based on product characteristics
+    Updated: Only recommends 3 methods
     
     Args:
         demand_variability: Coefficient of variation (%)
@@ -461,20 +341,114 @@ def recommend_method(
         criticality: Product criticality (HIGH/MEDIUM/LOW)
     
     Returns:
-        Recommended method name
+        Recommended method name (FIXED, DAYS_OF_SUPPLY, or LEAD_TIME_BASED)
     """
-    # Insufficient data
+    # Insufficient data - use manual input
     if data_availability < 30:
-        return 'DAYS_OF_SUPPLY'
+        return 'FIXED'
     
-    # High criticality products
+    # High criticality products - use statistical method if enough data
     if criticality == 'HIGH':
-        return 'STATISTICAL' if data_availability >= 180 else 'LEAD_TIME_BASED'
+        if data_availability >= 90:
+            return 'LEAD_TIME_BASED'
+        else:
+            return 'DAYS_OF_SUPPLY'
     
     # Based on demand variability
     if demand_variability < 20:
+        # Low variability - simple days of supply is sufficient
         return 'DAYS_OF_SUPPLY'
     elif demand_variability < 50:
-        return 'LEAD_TIME_BASED' if lead_time_days > 14 else 'DEMAND_PERCENTAGE'
+        # Moderate variability - use statistical if lead time is significant
+        if lead_time_days > 14:
+            return 'LEAD_TIME_BASED'
+        else:
+            return 'DAYS_OF_SUPPLY'
     else:
-        return 'STATISTICAL' if data_availability >= 90 else 'LEAD_TIME_BASED'
+        # High variability - always use statistical method if enough data
+        if data_availability >= 60:
+            return 'LEAD_TIME_BASED'
+        else:
+            return 'DAYS_OF_SUPPLY'
+
+
+def validate_calculation_inputs(method: str, params: Dict) -> tuple[bool, str]:
+    """
+    Validate inputs for calculation methods
+    
+    Args:
+        method: Calculation method
+        params: Parameters dictionary
+    
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    if method == 'FIXED':
+        if 'safety_stock_qty' not in params:
+            return False, "safety_stock_qty is required for FIXED method"
+        if params['safety_stock_qty'] < 0:
+            return False, "safety_stock_qty cannot be negative"
+        return True, ""
+    
+    elif method == 'DAYS_OF_SUPPLY':
+        if 'safety_days' not in params:
+            return False, "safety_days is required for DAYS_OF_SUPPLY method"
+        if params['safety_days'] <= 0:
+            return False, "safety_days must be positive"
+        
+        # Check if we can calculate avg_daily_demand
+        if params.get('avg_daily_demand', 0) == 0:
+            if not params.get('product_id') or not params.get('entity_id'):
+                return False, "Either avg_daily_demand or (product_id + entity_id) required"
+        
+        return True, ""
+    
+    elif method == 'LEAD_TIME_BASED':
+        if 'lead_time_days' not in params:
+            return False, "lead_time_days is required for LEAD_TIME_BASED method"
+        if params['lead_time_days'] <= 0:
+            return False, "lead_time_days must be positive"
+        
+        if 'service_level_percent' not in params:
+            return False, "service_level_percent is required for LEAD_TIME_BASED method"
+        if not (50 <= params['service_level_percent'] <= 99.9):
+            return False, "service_level_percent must be between 50 and 99.9"
+        
+        # Check if we can calculate demand stats
+        if params.get('demand_std_deviation') is None:
+            if not params.get('product_id') or not params.get('entity_id'):
+                return False, "Either demand_std_deviation or (product_id + entity_id) required"
+        
+        return True, ""
+    
+    else:
+        return False, f"Unknown method: {method}"
+
+
+def get_calculation_summary(method: str, params: Dict) -> str:
+    """
+    Generate human-readable summary of calculation
+    
+    Args:
+        method: Calculation method
+        params: Parameters used
+    
+    Returns:
+        Summary string
+    """
+    if method == 'FIXED':
+        return "Manual input - no calculation performed"
+    
+    elif method == 'DAYS_OF_SUPPLY':
+        days = params.get('safety_days', 0)
+        demand = params.get('avg_daily_demand', 0)
+        return f"Buffer for {days} days at {demand:.2f} units/day average demand"
+    
+    elif method == 'LEAD_TIME_BASED':
+        lt = params.get('lead_time_days', 0)
+        sl = params.get('service_level_percent', 0)
+        std = params.get('demand_std_deviation', 0)
+        return f"Statistical calculation for {sl}% service level with {lt}-day lead time (σ={std:.2f})"
+    
+    else:
+        return "Unknown calculation method"

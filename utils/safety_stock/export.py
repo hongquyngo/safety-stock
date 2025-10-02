@@ -1,7 +1,7 @@
 # utils/safety_stock/export.py
 """
 Export and reporting functions for Safety Stock Management
-Updated to support only 3 calculation methods: FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED
+Updated for simplified DB structure (no min/max stock, 3 methods only)
 """
 
 import pandas as pd
@@ -64,12 +64,12 @@ def export_to_excel(
     
     try:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Main columns (removed min/max stock)
             main_columns = [
                 'pt_code', 'product_name', 'brand_name',
                 'entity_code', 'entity_name',
                 'customer_code', 'customer_name',
-                'safety_stock_qty', 'min_stock_qty', 'max_stock_qty',
-                'reorder_point', 'reorder_qty',
+                'safety_stock_qty', 'reorder_point', 'reorder_qty',
                 'calculation_method', 'rule_type', 'status',
                 'effective_from', 'effective_to',
                 'priority_level', 'business_notes'
@@ -132,18 +132,16 @@ def _prepare_parameters_sheet(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
-    """Create Excel template for bulk upload - Updated for 3 methods only"""
+    """Create Excel template for bulk upload - 3 methods only"""
     output = io.BytesIO()
     
     try:
-        # Template structure
+        # Template structure (removed min/max stock)
         template_data = {
             'product_id': ['Required: Product ID'],
             'entity_id': ['Required: Entity ID'],
             'customer_id': ['Optional: Customer ID (leave blank for general rule)'],
             'safety_stock_qty': ['Required: Safety Stock Quantity'],
-            'min_stock_qty': ['Optional: Minimum Stock'],
-            'max_stock_qty': ['Optional: Maximum Stock'],
             'reorder_point': ['Optional: Reorder Point'],
             'reorder_qty': ['Optional: Reorder Quantity'],
             'calculation_method': ['Optional: FIXED | DAYS_OF_SUPPLY | LEAD_TIME_BASED'],
@@ -167,8 +165,6 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
                     'entity_id': 1,
                     'customer_id': '',
                     'safety_stock_qty': 100,
-                    'min_stock_qty': 50,
-                    'max_stock_qty': 500,
                     'reorder_point': 150,
                     'reorder_qty': 200,
                     'calculation_method': 'DAYS_OF_SUPPLY',
@@ -187,8 +183,6 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
                     'entity_id': 1,
                     'customer_id': 5,
                     'safety_stock_qty': 65,
-                    'min_stock_qty': 30,
-                    'max_stock_qty': 300,
                     'reorder_point': 150,
                     'reorder_qty': 100,
                     'calculation_method': 'LEAD_TIME_BASED',
@@ -207,8 +201,6 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
                     'entity_id': 1,
                     'customer_id': '',
                     'safety_stock_qty': 200,
-                    'min_stock_qty': '',
-                    'max_stock_qty': '',
                     'reorder_point': '',
                     'reorder_qty': '',
                     'calculation_method': 'FIXED',
@@ -255,7 +247,7 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
 
 
 def _create_instructions_sheet() -> pd.DataFrame:
-    """Create instructions dataframe for template - Updated for 3 methods"""
+    """Create instructions dataframe for template"""
     instructions = [
         'SAFETY STOCK BULK UPLOAD TEMPLATE',
         '',
@@ -267,7 +259,6 @@ def _create_instructions_sheet() -> pd.DataFrame:
         '',
         'OPTIONAL FIELDS:',
         '• customer_id: Leave blank for general rules, provide ID for customer-specific',
-        '• min/max_stock_qty: Minimum and maximum stock levels',
         '• reorder_point/qty: Reorder trigger and quantity',
         '',
         'CALCULATION METHODS (3 options):',
@@ -301,7 +292,7 @@ def generate_review_report(
     review_period_days: int = 30,
     entity_id: Optional[int] = None
 ) -> io.BytesIO:
-    """Generate comprehensive review report"""
+    """Generate comprehensive review report (simplified)"""
     output = io.BytesIO()
     
     try:
@@ -341,9 +332,7 @@ def _get_performance_summary(engine, days: int, entity_id: Optional[int]) -> pd.
         COUNT(DISTINCT CASE WHEN ssp.calculation_method = 'FIXED' THEN s.id END) as fixed_method,
         COUNT(DISTINCT CASE WHEN ssp.calculation_method = 'DAYS_OF_SUPPLY' THEN s.id END) as days_of_supply,
         COUNT(DISTINCT CASE WHEN ssp.calculation_method = 'LEAD_TIME_BASED' THEN s.id END) as lead_time_based,
-        AVG(CASE WHEN ssr.service_level_achieved IS NOT NULL 
-            THEN ssr.service_level_achieved END) as avg_service_level,
-        SUM(COALESCE(ssr.stockout_incidents, 0)) as total_stockouts
+        COUNT(DISTINCT ssr.id) as total_reviews
     FROM safety_stock_levels s
     LEFT JOIN safety_stock_parameters ssp ON s.id = ssp.safety_stock_level_id
     LEFT JOIN safety_stock_reviews ssr ON s.id = ssr.safety_stock_level_id
@@ -371,11 +360,8 @@ def _get_performance_summary(engine, days: int, entity_id: Optional[int]) -> pd.
         'Metric': 'LEAD_TIME_BASED Method',
         'Value': result.lead_time_based
     }, {
-        'Metric': 'Average Service Level',
-        'Value': f"{result.avg_service_level:.1f}%" if result.avg_service_level else "N/A"
-    }, {
-        'Metric': 'Total Stockouts',
-        'Value': result.total_stockouts
+        'Metric': f'Reviews in Last {days} Days',
+        'Value': result.total_reviews
     }])
 
 
@@ -389,22 +375,20 @@ def _get_pending_reviews(engine, days: int, entity_id: Optional[int]) -> pd.Data
         s.safety_stock_qty,
         ssp.calculation_method,
         DATEDIFF(CURRENT_DATE(), ssp.last_calculated_date) as days_since_calc,
-        ssr.next_review_date
+        MAX(ssr.review_date) as last_review_date
     FROM safety_stock_levels s
     JOIN products p ON s.product_id = p.id
     JOIN companies e ON s.entity_id = e.id
     LEFT JOIN safety_stock_parameters ssp ON s.id = ssp.safety_stock_level_id
-    LEFT JOIN (
-        SELECT safety_stock_level_id, MAX(next_review_date) as next_review_date
-        FROM safety_stock_reviews
-        GROUP BY safety_stock_level_id
-    ) ssr ON s.id = ssr.safety_stock_level_id
+    LEFT JOIN safety_stock_reviews ssr ON s.id = ssr.safety_stock_level_id
     WHERE s.delete_flag = 0 AND s.is_active = 1
     """ + (" AND s.entity_id = :entity_id" if entity_id else "") + """
-    AND (
-        ssr.next_review_date IS NULL 
-        OR ssr.next_review_date <= CURRENT_DATE()
-        OR DATEDIFF(CURRENT_DATE(), ssp.last_calculated_date) > :days
+    GROUP BY s.id, p.pt_code, p.name, e.company_code, s.safety_stock_qty, 
+             ssp.calculation_method, ssp.last_calculated_date
+    HAVING (
+        last_review_date IS NULL 
+        OR last_review_date < DATE_SUB(CURRENT_DATE(), INTERVAL :days DAY)
+        OR days_since_calc > :days
     )
     ORDER BY days_since_calc DESC
     LIMIT 100
@@ -419,7 +403,7 @@ def _get_pending_reviews(engine, days: int, entity_id: Optional[int]) -> pd.Data
 
 
 def _get_recent_reviews(engine, days: int, entity_id: Optional[int]) -> pd.DataFrame:
-    """Get recent review history"""
+    """Get recent review history (simplified fields)"""
     query = text("""
     SELECT 
         ssr.review_date,
@@ -429,8 +413,7 @@ def _get_recent_reviews(engine, days: int, entity_id: Optional[int]) -> pd.DataF
         ssr.new_safety_stock_qty,
         ssr.change_percentage,
         ssr.action_taken,
-        ssr.service_level_achieved,
-        ssr.stockout_incidents,
+        ssr.action_reason,
         ssr.reviewed_by
     FROM safety_stock_reviews ssr
     JOIN safety_stock_levels s ON ssr.safety_stock_level_id = s.id

@@ -1,7 +1,7 @@
 # utils/safety_stock/validations.py
 """
 Validation functions for Safety Stock Management
-Updated to support only 3 calculation methods
+Updated for simplified DB structure (no min/max stock, 3 methods only)
 """
 
 import pandas as pd
@@ -15,7 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def validate_quantities(data: Dict) -> Tuple[bool, List[str]]:
-    """Validate quantity fields according to business rules"""
+    """
+    Validate quantity fields according to business rules
+    Simplified: no min/max stock validation
+    """
     errors = []
     
     safety_stock = data.get('safety_stock_qty')
@@ -26,24 +29,8 @@ def validate_quantities(data: Dict) -> Tuple[bool, List[str]]:
     if safety_stock < 0:
         errors.append("Safety stock quantity cannot be negative")
     
-    min_stock = data.get('min_stock_qty')
-    max_stock = data.get('max_stock_qty')
     reorder_point = data.get('reorder_point')
     reorder_qty = data.get('reorder_qty')
-    
-    if min_stock is not None:
-        if min_stock < 0:
-            errors.append("Minimum stock quantity cannot be negative")
-        elif min_stock > safety_stock:
-            errors.append("Minimum stock cannot exceed safety stock")
-    
-    if max_stock is not None:
-        if max_stock < 0:
-            errors.append("Maximum stock quantity cannot be negative")
-        elif max_stock < safety_stock:
-            errors.append("Maximum stock cannot be less than safety stock")
-        elif min_stock is not None and max_stock < min_stock:
-            errors.append("Maximum stock cannot be less than minimum stock")
     
     if reorder_point is not None:
         if reorder_point < 0:
@@ -101,7 +88,7 @@ def validate_priority(priority_level: int, is_customer_specific: bool) -> Tuple[
 def validate_calculation_parameters(method: str, params: Dict) -> Tuple[bool, List[str]]:
     """
     Validate parameters for calculation methods
-    Updated for 3 methods only: FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED
+    3 methods only: FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED
     """
     errors = []
     
@@ -285,11 +272,11 @@ def validate_safety_stock_data(
 ) -> Tuple[bool, List[str]]:
     """
     Master validation function
-    Updated for 3 calculation methods only
+    Updated for simplified structure (no min/max stock)
     """
     all_errors = []
     
-    # Validate quantities
+    # Validate quantities (simplified)
     valid, errors = validate_quantities(data)
     if not valid:
         all_errors.extend(errors)
@@ -409,3 +396,50 @@ def get_validation_summary(errors: List[str]) -> str:
         summary += f"{i}. {error}\n"
     
     return summary
+
+
+def validate_review_data(review_data: Dict) -> Tuple[bool, List[str]]:
+    """
+    Validate review data (simplified)
+    Only validates core fields needed for change tracking
+    """
+    errors = []
+    
+    # Required fields
+    if not review_data.get('old_safety_stock_qty'):
+        errors.append("Old safety stock quantity is required")
+    
+    if not review_data.get('new_safety_stock_qty'):
+        errors.append("New safety stock quantity is required")
+    
+    if not review_data.get('action_taken'):
+        errors.append("Action taken is required")
+    
+    # Validate action_taken value
+    valid_actions = ['INCREASED', 'DECREASED', 'NO_CHANGE', 'METHOD_CHANGED']
+    if review_data.get('action_taken') and review_data['action_taken'] not in valid_actions:
+        errors.append(f"Invalid action. Must be one of: {', '.join(valid_actions)}")
+    
+    # Validate quantities are positive
+    if review_data.get('old_safety_stock_qty') is not None:
+        if review_data['old_safety_stock_qty'] < 0:
+            errors.append("Old safety stock quantity cannot be negative")
+    
+    if review_data.get('new_safety_stock_qty') is not None:
+        if review_data['new_safety_stock_qty'] < 0:
+            errors.append("New safety stock quantity cannot be negative")
+    
+    # Validate consistency between quantities and action
+    old_qty = review_data.get('old_safety_stock_qty')
+    new_qty = review_data.get('new_safety_stock_qty')
+    action = review_data.get('action_taken')
+    
+    if old_qty is not None and new_qty is not None and action:
+        if action == 'INCREASED' and new_qty <= old_qty:
+            errors.append("Action is INCREASED but new quantity is not greater than old quantity")
+        elif action == 'DECREASED' and new_qty >= old_qty:
+            errors.append("Action is DECREASED but new quantity is not less than old quantity")
+        elif action == 'NO_CHANGE' and new_qty != old_qty:
+            errors.append("Action is NO_CHANGE but quantities are different")
+    
+    return len(errors) == 0, errors

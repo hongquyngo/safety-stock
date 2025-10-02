@@ -1,7 +1,8 @@
 # pages/1_📦_Safety_Stock_Management.py
 """
 Safety Stock Management Main Page
-Version 2.0 - Cleaned and optimized
+Version 2.0 - Updated for simplified DB structure
+Changes: Removed min/max stock, simplified reviews
 """
 
 import streamlit as st
@@ -134,7 +135,6 @@ def load_products():
         """)
         with engine.connect() as conn:
             df = pd.read_sql(query, conn)
-            # Pre-format display text
             df['display_text'] = df.apply(lambda row: format_product_display(row), axis=1)
             return df
     except Exception as e:
@@ -144,19 +144,12 @@ def load_products():
 def format_product_display(row):
     """Format: PT_CODE | Name | Package (Brand)"""
     pt_code = str(row['pt_code'])
-    
-    # Truncate name
     name = str(row['name']) if pd.notna(row['name']) else ""
     name = name[:35] + "..." if len(name) > 35 else name
-    
-    # Package size
     pkg = str(row['package_size']) if pd.notna(row['package_size']) else ""
     pkg = pkg[:20] + "..." if len(pkg) > 20 else pkg
-    
-    # Brand
     brand = str(row['brand_name']) if pd.notna(row['brand_name']) else ""
     
-    # Build display
     display = f"{pt_code} | {name}"
     if pkg and brand:
         display += f" | {pkg} ({brand})"
@@ -195,7 +188,7 @@ def safe_int(value, default=0):
     try:
         if pd.isna(value):
             return default
-        if hasattr(value, 'item'):  # numpy types
+        if hasattr(value, 'item'):
             return int(value.item())
         return int(value)
     except:
@@ -214,9 +207,8 @@ def safe_float(value, default=0.0):
 
 @st.dialog("Safety Stock Configuration", width="large")
 def safety_stock_form(mode='add', record_id=None):
-    """Add/Edit safety stock dialog"""
+    """Add/Edit safety stock dialog - UPDATED: removed min/max stock"""
     
-    # Load data
     existing_data = {}
     if mode == 'edit' and record_id:
         existing_data = get_safety_stock_by_id(record_id) or {}
@@ -240,9 +232,7 @@ def safety_stock_form(mode='add', record_id=None):
         with col1:
             # Product selection
             if mode == 'add':
-                # Use only top 200 products for performance
                 display_products = products.head(200)
-                
                 selected_product = st.selectbox(
                     "Product * (type to search)",
                     options=range(len(display_products)),
@@ -250,7 +240,6 @@ def safety_stock_form(mode='add', record_id=None):
                     help="Start typing PT code, name, package size, or brand to filter"
                 )
                 product_id = display_products.iloc[selected_product]['id']
-                
                 st.caption(f"Showing {len(display_products)} products")
             else:
                 st.text_input(
@@ -333,6 +322,7 @@ def safety_stock_form(mode='add', record_id=None):
         )
     
     with tab2:
+        
         col1, col2 = st.columns(2)
         
         with col1:
@@ -344,43 +334,32 @@ def safety_stock_form(mode='add', record_id=None):
                 "Safety Stock Quantity *",
                 min_value=0.0,
                 value=default_ss_qty,
-                step=1.0
+                step=1.0,
+                help="The buffer quantity to maintain above zero"
             )
             
-            min_stock_qty = st.number_input(
-                "Minimum Stock",
-                min_value=0.0,
-                value=safe_float(existing_data.get('min_stock_qty')),
-                step=1.0
-            )
-            
-            max_stock_qty = st.number_input(
-                "Maximum Stock",
-                min_value=0.0,
-                value=safe_float(existing_data.get('max_stock_qty')),
-                step=1.0
-            )
+            if 'calculated_safety_stock' in st.session_state:
+                st.success(f"✓ Calculated: {st.session_state.calculated_safety_stock:.2f}")
+                if st.button("Clear Calculated Value"):
+                    del st.session_state.calculated_safety_stock
+                    st.rerun()
         
         with col2:
             reorder_point = st.number_input(
                 "Reorder Point",
                 min_value=0.0,
                 value=safe_float(existing_data.get('reorder_point')),
-                step=1.0
+                step=1.0,
+                help="Trigger new purchase order at this level"
             )
             
             reorder_qty = st.number_input(
                 "Reorder Quantity",
                 min_value=0.0,
                 value=safe_float(existing_data.get('reorder_qty')),
-                step=1.0
+                step=1.0,
+                help="Suggested order quantity (can be EOQ)"
             )
-            
-            if 'calculated_safety_stock' in st.session_state:
-                st.info(f"Calculated: {st.session_state.calculated_safety_stock:.2f}")
-                if st.button("Clear"):
-                    del st.session_state.calculated_safety_stock
-                    st.rerun()
     
     with tab3:
         methods = ['FIXED', 'DAYS_OF_SUPPLY', 'LEAD_TIME_BASED']
@@ -392,7 +371,7 @@ def safety_stock_form(mode='add', record_id=None):
             "Calculation Method",
             options=methods,
             index=method_idx,
-            help="FIXED: Manual input | DAYS_OF_SUPPLY: Days × Demand | LEAD_TIME_BASED: Statistical with service level"
+            help="FIXED: Manual | DAYS_OF_SUPPLY: Days × Demand | LEAD_TIME_BASED: Statistical with service level"
         )
         
         calc_params = {}
@@ -400,25 +379,35 @@ def safety_stock_form(mode='add', record_id=None):
         if calculation_method == 'DAYS_OF_SUPPLY':
             col1, col2 = st.columns(2)
             with col1:
+                # Handle NULL/0 values by using default 14
+                safety_days_value = existing_data.get('safety_days')
+                if safety_days_value is None or safety_days_value == 0:
+                    safety_days_value = 14
+                
                 calc_params['safety_days'] = st.number_input(
                     "Safety Days",
                     min_value=1,
-                    value=safe_int(existing_data.get('safety_days', 14))
+                    value=safe_int(safety_days_value, default=14)
                 )
             with col2:
                 calc_params['avg_daily_demand'] = st.number_input(
                     "Avg Daily Demand",
                     min_value=0.0,
-                    value=safe_float(existing_data.get('avg_daily_demand'))
+                    value=safe_float(existing_data.get('avg_daily_demand', 0))
                 )
         
         elif calculation_method == 'LEAD_TIME_BASED':
             col1, col2 = st.columns(2)
             with col1:
+                # Handle NULL/0 values by using default 7
+                lead_time_value = existing_data.get('lead_time_days')
+                if lead_time_value is None or lead_time_value == 0:
+                    lead_time_value = 7
+                
                 calc_params['lead_time_days'] = st.number_input(
                     "Lead Time (days)",
                     min_value=1,
-                    value=safe_int(existing_data.get('lead_time_days', 7))
+                    value=safe_int(lead_time_value, default=7)
                 )
                 calc_params['service_level_percent'] = st.selectbox(
                     "Service Level %",
@@ -429,7 +418,7 @@ def safety_stock_form(mode='add', record_id=None):
                 calc_params['demand_std_deviation'] = st.number_input(
                     "Demand Std Dev",
                     min_value=0.0,
-                    value=safe_float(existing_data.get('demand_std_deviation'))
+                    value=safe_float(existing_data.get('demand_std_deviation', 0))
                 )
         
         if calculation_method != 'FIXED':
@@ -462,8 +451,6 @@ def safety_stock_form(mode='add', record_id=None):
                 'entity_id': entity_id,
                 'customer_id': customer_id,
                 'safety_stock_qty': safety_stock_qty,
-                'min_stock_qty': min_stock_qty if min_stock_qty > 0 else None,
-                'max_stock_qty': max_stock_qty if max_stock_qty > 0 else None,
                 'reorder_point': reorder_point if reorder_point > 0 else None,
                 'reorder_qty': reorder_qty if reorder_qty > 0 else None,
                 'effective_from': effective_from,
@@ -512,109 +499,155 @@ def safety_stock_form(mode='add', record_id=None):
 
 @st.dialog("Review Safety Stock", width="large")
 def review_dialog(safety_stock_id):
-    """Review and adjust safety stock"""
+    """Review and adjust safety stock quantity ONLY - for regular users"""
     
     current_data = get_safety_stock_by_id(safety_stock_id)
     if not current_data:
         st.error("Record not found")
         return
     
-    st.markdown("### Safety Stock Review")
+    st.markdown("### 📋 Safety Stock Review")
+    st.info("ℹ️ Review process: Change quantity with documented reason. Use Edit for other changes.")
     
-    # Current info
-    col1, col2, col3 = st.columns(3)
+    # Current context (read-only)
+    st.subheader("Current Information")
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("Product", current_data.get('pt_code', 'N/A'))
     with col2:
-        st.metric("Current Safety Stock", f"{safe_float(current_data.get('safety_stock_qty')):.0f}")
+        st.metric("Entity", current_data.get('entity_name', 'N/A')[:20])
     with col3:
+        st.metric("Current Qty", f"{safe_float(current_data.get('safety_stock_qty')):.0f}")
+    with col4:
         st.metric("Method", current_data.get('calculation_method', 'FIXED'))
     
-    st.divider()
+    # Show additional context
+    with st.expander("View Current Settings", expanded=False):
+        info_col1, info_col2 = st.columns(2)
+        with info_col1:
+            st.write(f"**Reorder Point:** {safe_float(current_data.get('reorder_point', 0)):.0f}")
+            st.write(f"**Effective From:** {current_data.get('effective_from')}")
+            st.write(f"**Priority:** {current_data.get('priority_level')}")
+        with info_col2:
+            st.write(f"**Reorder Qty:** {safe_float(current_data.get('reorder_qty', 0)):.0f}")
+            st.write(f"**Effective To:** {current_data.get('effective_to') or 'Ongoing'}")
+            customer = current_data.get('customer_name') or 'General Rule'
+            st.write(f"**Customer:** {customer}")
     
-    # Performance metrics
-    st.subheader("Performance Metrics")
+    st.divider()
+    st.subheader("Review Decision")
+    
+    # Review form - ONLY quantity change
     col1, col2 = st.columns(2)
     
     with col1:
-        stockout_incidents = st.number_input("Stockout Incidents", min_value=0, value=0)
-        service_level_achieved = st.number_input(
-            "Service Level Achieved (%)", 
-            min_value=0.0, 
-            max_value=100.0, 
-            value=95.0
-        )
-        avg_daily_demand = st.number_input(
-            "Actual Avg Daily Demand",
-            min_value=0.0,
-            value=safe_float(current_data.get('avg_daily_demand'))
-        )
-    
-    with col2:
-        excess_stock_days = st.number_input("Days with Excess Stock", min_value=0, value=0)
-        inventory_turns = st.number_input("Inventory Turns", min_value=0.0, value=0.0)
-        holding_cost_usd = st.number_input("Holding Cost (USD)", min_value=0.0, value=0.0)
-    
-    st.divider()
-    
-    # Adjustment
-    st.subheader("Adjustment")
-    col1, col2 = st.columns(2)
-    
-    with col1:
+        old_qty = safe_float(current_data.get('safety_stock_qty'))
         new_safety_stock_qty = st.number_input(
-            "New Safety Stock Quantity",
+            "New Safety Stock Quantity *",
             min_value=0.0,
-            value=safe_float(current_data.get('safety_stock_qty'))
+            value=old_qty,
+            step=1.0,
+            help="Adjust the safety stock quantity based on performance"
         )
+        
+        # Auto-determine action
+        if new_safety_stock_qty > old_qty:
+            default_action = 'INCREASED'
+        elif new_safety_stock_qty < old_qty:
+            default_action = 'DECREASED'
+        else:
+            default_action = 'NO_CHANGE'
+        
+        action_idx = ['NO_CHANGE', 'INCREASED', 'DECREASED', 'METHOD_CHANGED'].index(default_action)
         action_taken = st.selectbox(
-            "Action",
-            options=['NO_CHANGE', 'INCREASED', 'DECREASED', 'METHOD_CHANGED']
+            "Action *",
+            options=['NO_CHANGE', 'INCREASED', 'DECREASED', 'METHOD_CHANGED'],
+            index=action_idx,
+            help="System auto-detected based on quantity change"
         )
+        
+        # Show change summary
+        if new_safety_stock_qty != old_qty:
+            change = new_safety_stock_qty - old_qty
+            pct_change = (change / old_qty * 100) if old_qty > 0 else 0
+            if change > 0:
+                st.success(f"↑ Increase: +{change:.0f} units (+{pct_change:.1f}%)")
+            else:
+                st.warning(f"↓ Decrease: {change:.0f} units ({pct_change:.1f}%)")
+        else:
+            st.info("No quantity change")
     
     with col2:
-        action_reason = st.text_input("Reason for Change")
-        next_review_date = st.date_input(
-            "Next Review Date",
-            value=datetime.now().date() + timedelta(days=30)
-        )
-    
-    review_notes = st.text_area("Review Notes")
-    
-    if st.button("Submit Review", type="primary"):
-        review_data = {
-            'review_date': datetime.now().date(),
-            'review_type': 'PERIODIC',
-            'old_safety_stock_qty': safe_float(current_data.get('safety_stock_qty')),
-            'new_safety_stock_qty': new_safety_stock_qty,
-            'avg_daily_demand': avg_daily_demand,
-            'stockout_incidents': stockout_incidents,
-            'service_level_achieved': service_level_achieved,
-            'excess_stock_days': excess_stock_days,
-            'inventory_turns': inventory_turns,
-            'holding_cost_usd': holding_cost_usd,
-            'action_taken': action_taken,
-            'action_reason': action_reason,
-            'review_notes': review_notes,
-            'next_review_date': next_review_date
-        }
-        
-        success, message = create_safety_stock_review(
-            safety_stock_id,
-            review_data,
-            st.session_state.username
+        review_type = st.selectbox(
+            "Review Type",
+            options=['PERIODIC', 'EXCEPTION', 'EMERGENCY', 'ANNUAL'],
+            help="What triggered this review?"
         )
         
-        if success:
-            if new_safety_stock_qty != safe_float(current_data.get('safety_stock_qty')):
-                update_data = {'safety_stock_qty': new_safety_stock_qty}
-                update_safety_stock(safety_stock_id, update_data, st.session_state.username)
+        action_reason = st.text_area(
+            "Reason for Change *",
+            help="⚠️ REQUIRED: Explain why this change is needed. This is the audit trail.",
+            height=120,
+            placeholder="Example: Had 3 stockouts last month due to increased demand from new customer campaign..."
+        )
+    
+    review_notes = st.text_area(
+        "Additional Notes (Optional)",
+        help="Any additional context, observations, or action items",
+        height=80,
+        placeholder="Optional: Add any supporting information..."
+    )
+    
+    st.divider()
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("Submit Review", type="primary", use_container_width=True):
+            # Validation
+            if not action_reason or len(action_reason.strip()) < 10:
+                st.error("⚠️ Please provide a meaningful reason (at least 10 characters)")
+                return
             
-            st.success("Review submitted successfully!")
-            st.cache_data.clear()
+            # Consistency check
+            if action_taken == 'INCREASED' and new_safety_stock_qty <= old_qty:
+                st.error("Action is INCREASED but quantity didn't increase")
+                return
+            elif action_taken == 'DECREASED' and new_safety_stock_qty >= old_qty:
+                st.error("Action is DECREASED but quantity didn't decrease")
+                return
+            
+            review_data = {
+                'review_date': datetime.now().date(),
+                'review_type': review_type,
+                'old_safety_stock_qty': old_qty,
+                'new_safety_stock_qty': new_safety_stock_qty,
+                'action_taken': action_taken,
+                'action_reason': action_reason.strip(),
+                'review_notes': review_notes.strip() if review_notes else None
+            }
+            
+            # Create review record
+            success, message = create_safety_stock_review(
+                safety_stock_id,
+                review_data,
+                st.session_state.username
+            )
+            
+            if success:
+                # Update quantity if changed
+                if new_safety_stock_qty != old_qty:
+                    update_data = {'safety_stock_qty': new_safety_stock_qty}
+                    update_safety_stock(safety_stock_id, update_data, st.session_state.username)
+                
+                st.success("✅ Review submitted and quantity updated successfully!")
+                st.cache_data.clear()
+                st.rerun()
+            else:
+                st.error(f"❌ Error: {message}")
+    
+    with col2:
+        if st.button("Cancel", use_container_width=True):
             st.rerun()
-        else:
-            st.error(f"Error: {message}")
 
 
 @st.dialog("Bulk Upload", width="large")
@@ -796,10 +829,11 @@ def main():
     if df.empty:
         st.info("No records found")
     else:
+        # Updated display columns (removed min/max stock)
         display_cols = [
             'pt_code', 'product_name', 'entity_code', 'customer_code',
-            'safety_stock_qty', 'min_stock_qty', 'max_stock_qty',
-            'reorder_point', 'calculation_method', 'rule_type', 
+            'safety_stock_qty', 'reorder_point', 'reorder_qty',
+            'calculation_method', 'rule_type', 
             'status', 'effective_from', 'priority_level'
         ]
         

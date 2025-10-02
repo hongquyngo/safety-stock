@@ -1,7 +1,7 @@
 # utils/safety_stock/export.py
 """
 Export and reporting functions for Safety Stock Management
-Handles Excel exports, template generation, and report creation
+Updated to support only 3 calculation methods: FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED
 """
 
 import pandas as pd
@@ -29,23 +29,13 @@ THIN_BORDER = Border(
 )
 
 
-# ==================== Excel Formatting ====================
-
 def format_excel_sheet(worksheet, freeze_row: int = 2):
-    """
-    Apply standard formatting to Excel worksheet
-    
-    Args:
-        worksheet: openpyxl worksheet object
-        freeze_row: Row number to freeze (default 2 for header)
-    """
-    # Format header row
+    """Apply standard formatting to Excel worksheet"""
     for cell in worksheet[1]:
         cell.font = HEADER_FONT
         cell.fill = HEADER_FILL
         cell.alignment = HEADER_ALIGNMENT
     
-    # Auto-adjust column widths
     for column in worksheet.columns:
         max_length = 0
         column_letter = column[0].column_letter
@@ -57,38 +47,23 @@ def format_excel_sheet(worksheet, freeze_row: int = 2):
         adjusted_width = min(max_length + 2, 50)
         worksheet.column_dimensions[column_letter].width = adjusted_width
     
-    # Add borders to all cells
     for row in worksheet.iter_rows(min_row=1):
         for cell in row:
             cell.border = THIN_BORDER
     
-    # Freeze panes
     worksheet.freeze_panes = f'A{freeze_row}'
 
-
-# ==================== Main Export Function ====================
 
 def export_to_excel(
     df: pd.DataFrame,
     include_parameters: bool = True,
     include_metadata: bool = True
 ) -> io.BytesIO:
-    """
-    Export safety stock data to formatted Excel file
-    
-    Args:
-        df: DataFrame with safety stock data
-        include_parameters: Include calculation parameters sheet
-        include_metadata: Include metadata columns (created by, dates, etc.)
-    
-    Returns:
-        BytesIO object containing Excel file
-    """
+    """Export safety stock data to formatted Excel file"""
     output = io.BytesIO()
     
     try:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Prepare main data
             main_columns = [
                 'pt_code', 'product_name', 'brand_name',
                 'entity_code', 'entity_name',
@@ -103,25 +78,20 @@ def export_to_excel(
             if include_metadata:
                 main_columns.extend(['created_by', 'created_date', 'updated_by', 'updated_date'])
             
-            # Select available columns
             export_columns = [col for col in main_columns if col in df.columns]
             main_df = df[export_columns].copy()
             
-            # Format dates
             for col in ['effective_from', 'effective_to', 'created_date', 'updated_date']:
                 if col in main_df.columns:
                     main_df[col] = pd.to_datetime(main_df[col], errors='coerce').dt.strftime('%Y-%m-%d')
             
-            # Write main sheet
             main_df.to_excel(writer, sheet_name='Safety Stock Levels', index=False)
             
-            # Add parameters sheet if requested and data exists
             if include_parameters:
                 param_df = _prepare_parameters_sheet(df)
                 if not param_df.empty:
                     param_df.to_excel(writer, sheet_name='Calculation Parameters', index=False)
             
-            # Format sheets
             workbook = writer.book
             for sheet_name in workbook.sheetnames:
                 format_excel_sheet(workbook[sheet_name])
@@ -150,11 +120,9 @@ def _prepare_parameters_sheet(df: pd.DataFrame) -> pd.DataFrame:
     
     param_df = df[available_columns].copy()
     
-    # Only include rows with calculation method
     if 'calculation_method' in param_df.columns:
         param_df = param_df[param_df['calculation_method'].notna()]
     
-    # Format date
     if 'last_calculated_date' in param_df.columns:
         param_df['last_calculated_date'] = pd.to_datetime(
             param_df['last_calculated_date'], errors='coerce'
@@ -163,22 +131,12 @@ def _prepare_parameters_sheet(df: pd.DataFrame) -> pd.DataFrame:
     return param_df
 
 
-# ==================== Template Generation ====================
-
 def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
-    """
-    Create Excel template for bulk upload
-    
-    Args:
-        include_sample_data: Include sample rows
-    
-    Returns:
-        BytesIO object containing template Excel file
-    """
+    """Create Excel template for bulk upload - Updated for 3 methods only"""
     output = io.BytesIO()
     
     try:
-        # Create template structure
+        # Template structure
         template_data = {
             'product_id': ['Required: Product ID'],
             'entity_id': ['Required: Entity ID'],
@@ -188,10 +146,11 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
             'max_stock_qty': ['Optional: Maximum Stock'],
             'reorder_point': ['Optional: Reorder Point'],
             'reorder_qty': ['Optional: Reorder Quantity'],
-            'calculation_method': ['Optional: FIXED|DAYS_OF_SUPPLY|LEAD_TIME_BASED|MIN_MAX|STATISTICAL'],
-            'lead_time_days': ['Optional: Lead Time (days)'],
-            'safety_days': ['Optional: Safety Days'],
-            'service_level_percent': ['Optional: Service Level % (e.g., 95)'],
+            'calculation_method': ['Optional: FIXED | DAYS_OF_SUPPLY | LEAD_TIME_BASED'],
+            'lead_time_days': ['Optional: Lead Time (for LEAD_TIME_BASED)'],
+            'safety_days': ['Optional: Safety Days (for DAYS_OF_SUPPLY)'],
+            'service_level_percent': ['Optional: Service Level % (for LEAD_TIME_BASED: 90, 95, 98, 99)'],
+            'demand_std_deviation': ['Optional: Demand Std Dev (for LEAD_TIME_BASED)'],
             'avg_daily_demand': ['Optional: Average Daily Demand'],
             'effective_from': ['Required: Start Date (YYYY-MM-DD)'],
             'effective_to': ['Optional: End Date (YYYY-MM-DD)'],
@@ -201,7 +160,6 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
         
         df = pd.DataFrame(template_data)
         
-        # Add sample data if requested
         if include_sample_data:
             sample_rows = [
                 {
@@ -214,59 +172,75 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
                     'reorder_point': 150,
                     'reorder_qty': 200,
                     'calculation_method': 'DAYS_OF_SUPPLY',
-                    'lead_time_days': 7,
+                    'lead_time_days': '',
                     'safety_days': 14,
                     'service_level_percent': '',
+                    'demand_std_deviation': '',
                     'avg_daily_demand': 10,
                     'effective_from': '2025-01-01',
                     'effective_to': '',
                     'priority_level': 100,
-                    'business_notes': 'Standard rule'
+                    'business_notes': 'Standard rule - stable demand'
                 },
                 {
                     'product_id': 102,
                     'entity_id': 1,
                     'customer_id': 5,
-                    'safety_stock_qty': 50,
-                    'min_stock_qty': 25,
-                    'max_stock_qty': 250,
-                    'reorder_point': 75,
+                    'safety_stock_qty': 65,
+                    'min_stock_qty': 30,
+                    'max_stock_qty': 300,
+                    'reorder_point': 150,
                     'reorder_qty': 100,
                     'calculation_method': 'LEAD_TIME_BASED',
                     'lead_time_days': 14,
                     'safety_days': '',
                     'service_level_percent': 95,
-                    'avg_daily_demand': 5,
+                    'demand_std_deviation': 3.5,
+                    'avg_daily_demand': 8,
                     'effective_from': '2025-01-01',
                     'effective_to': '2025-12-31',
                     'priority_level': 50,
-                    'business_notes': 'Customer-specific rule'
+                    'business_notes': 'Customer-specific - variable demand'
+                },
+                {
+                    'product_id': 103,
+                    'entity_id': 1,
+                    'customer_id': '',
+                    'safety_stock_qty': 200,
+                    'min_stock_qty': '',
+                    'max_stock_qty': '',
+                    'reorder_point': '',
+                    'reorder_qty': '',
+                    'calculation_method': 'FIXED',
+                    'lead_time_days': '',
+                    'safety_days': '',
+                    'service_level_percent': '',
+                    'demand_std_deviation': '',
+                    'avg_daily_demand': '',
+                    'effective_from': '2025-01-01',
+                    'effective_to': '',
+                    'priority_level': 100,
+                    'business_notes': 'New product - manual input'
                 }
             ]
             
             sample_df = pd.DataFrame(sample_rows)
             df = pd.concat([df, sample_df], ignore_index=True)
         
-        # Write to Excel
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             df.to_excel(writer, sheet_name='Safety Stock Import', index=False)
             
-            # Add instructions sheet
             instructions_df = _create_instructions_sheet()
             instructions_df.to_excel(writer, sheet_name='Instructions', index=False)
             
-            # Format sheets
             workbook = writer.book
             
-            # Format data sheet
             data_sheet = workbook['Safety Stock Import']
             format_excel_sheet(data_sheet)
             
-            # Highlight instruction row in red
             for cell in data_sheet[1]:
                 cell.font = Font(italic=True, color="FF0000")
             
-            # Format instructions sheet
             inst_sheet = workbook['Instructions']
             inst_sheet.column_dimensions['A'].width = 100
             inst_sheet['A1'].font = Font(bold=True, size=14)
@@ -281,7 +255,7 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
 
 
 def _create_instructions_sheet() -> pd.DataFrame:
-    """Create instructions dataframe for template"""
+    """Create instructions dataframe for template - Updated for 3 methods"""
     instructions = [
         'SAFETY STOCK BULK UPLOAD TEMPLATE',
         '',
@@ -296,49 +270,47 @@ def _create_instructions_sheet() -> pd.DataFrame:
         '• min/max_stock_qty: Minimum and maximum stock levels',
         '• reorder_point/qty: Reorder trigger and quantity',
         '',
-        'CALCULATION METHODS:',
-        '• FIXED: Manual safety stock value',
-        '• DAYS_OF_SUPPLY: Based on days of supply',
-        '• LEAD_TIME_BASED: Statistical with lead time',
-        '• MIN_MAX: Min-Max inventory system',
-        '• STATISTICAL: Advanced statistical model',
+        'CALCULATION METHODS (3 options):',
+        '',
+        '1. FIXED - Manual input, no calculation',
+        '   • Use for: New products, special contracts',
+        '   • Required: None (just safety_stock_qty)',
+        '',
+        '2. DAYS_OF_SUPPLY - Simple coverage calculation',
+        '   • Use for: Stable demand (CV < 20%)',
+        '   • Required: safety_days, avg_daily_demand',
+        '   • Formula: SS = safety_days × avg_daily_demand',
+        '',
+        '3. LEAD_TIME_BASED - Statistical method',
+        '   • Use for: Variable demand (CV >= 20%), critical items',
+        '   • Required: lead_time_days, service_level_percent, demand_std_deviation',
+        '   • Formula: SS = Z-score × √lead_time × std_deviation',
+        '   • Service levels: 90, 94, 95, 98, 99',
         '',
         'NOTES:',
         '• Priority: Lower number = higher priority (default 100)',
         '• Customer-specific rules override general rules',
-        '• Delete the first row (field descriptions) before uploading'
+        '• Delete the first row (field descriptions) before uploading',
+        '• See sample data rows for examples of each method'
     ]
     
     return pd.DataFrame({'Instructions': instructions})
 
 
-# ==================== Review Report Generation ====================
-
 def generate_review_report(
     review_period_days: int = 30,
     entity_id: Optional[int] = None
 ) -> io.BytesIO:
-    """
-    Generate comprehensive review report
-    
-    Args:
-        review_period_days: Number of days to analyze
-        entity_id: Filter by entity
-    
-    Returns:
-        BytesIO object containing report Excel file
-    """
+    """Generate comprehensive review report"""
     output = io.BytesIO()
     
     try:
         engine = get_db_engine()
         
-        # Get report data
         summary_df = _get_performance_summary(engine, review_period_days, entity_id)
         pending_df = _get_pending_reviews(engine, review_period_days, entity_id)
         recent_df = _get_recent_reviews(engine, review_period_days, entity_id)
         
-        # Write to Excel
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
             summary_df.to_excel(writer, sheet_name='Summary', index=False)
             
@@ -348,7 +320,6 @@ def generate_review_report(
             if not recent_df.empty:
                 recent_df.to_excel(writer, sheet_name='Recent Reviews', index=False)
             
-            # Format all sheets
             workbook = writer.book
             for sheet_name in workbook.sheetnames:
                 format_excel_sheet(workbook[sheet_name])
@@ -368,7 +339,8 @@ def _get_performance_summary(engine, days: int, entity_id: Optional[int]) -> pd.
     SELECT 
         COUNT(DISTINCT s.id) as total_items,
         COUNT(DISTINCT CASE WHEN ssp.calculation_method = 'FIXED' THEN s.id END) as fixed_method,
-        COUNT(DISTINCT CASE WHEN ssp.calculation_method != 'FIXED' THEN s.id END) as calculated,
+        COUNT(DISTINCT CASE WHEN ssp.calculation_method = 'DAYS_OF_SUPPLY' THEN s.id END) as days_of_supply,
+        COUNT(DISTINCT CASE WHEN ssp.calculation_method = 'LEAD_TIME_BASED' THEN s.id END) as lead_time_based,
         AVG(CASE WHEN ssr.service_level_achieved IS NOT NULL 
             THEN ssr.service_level_achieved END) as avg_service_level,
         SUM(COALESCE(ssr.stockout_incidents, 0)) as total_stockouts
@@ -390,11 +362,14 @@ def _get_performance_summary(engine, days: int, entity_id: Optional[int]) -> pd.
         'Metric': 'Total Active Items',
         'Value': result.total_items
     }, {
-        'Metric': 'Fixed Method Count',
+        'Metric': 'FIXED Method',
         'Value': result.fixed_method
     }, {
-        'Metric': 'Calculated Method Count',
-        'Value': result.calculated
+        'Metric': 'DAYS_OF_SUPPLY Method',
+        'Value': result.days_of_supply
+    }, {
+        'Metric': 'LEAD_TIME_BASED Method',
+        'Value': result.lead_time_based
     }, {
         'Metric': 'Average Service Level',
         'Value': f"{result.avg_service_level:.1f}%" if result.avg_service_level else "N/A"

@@ -1,7 +1,7 @@
 # pages/1_📦_Safety_Stock_Management.py
 """
 Safety Stock Management Main Page
-Complete CRUD operations with dialog-based forms
+Version 2.0 - Cleaned and optimized
 """
 
 import streamlit as st
@@ -23,10 +23,7 @@ from utils.safety_stock.crud import (
     get_review_history,
     bulk_create_safety_stock
 )
-from utils.safety_stock.calculations import (
-    calculate_safety_stock,
-    Z_SCORE_MAP
-)
+from utils.safety_stock.calculations import calculate_safety_stock, Z_SCORE_MAP
 from utils.safety_stock.validations import (
     validate_safety_stock_data,
     validate_bulk_data,
@@ -48,12 +45,10 @@ st.set_page_config(
     layout="wide"
 )
 
-# Initialize auth manager
+# Initialize auth
 auth_manager = AuthManager()
-
-# Check authentication
 if not auth_manager.check_session():
-    st.warning("⚠️ Please login to access this page")
+    st.warning("Please login to access this page")
     st.stop()
 
 # Initialize session state
@@ -65,7 +60,7 @@ if 'ss_filters' not in st.session_state:
         'status': 'active'
     }
 
-# ==================== Helper Functions ====================
+# ==================== Data Loading Functions ====================
 
 @st.cache_data(ttl=300)
 def load_entities():
@@ -120,7 +115,7 @@ def load_customers():
 
 @st.cache_data(ttl=300)
 def load_products():
-    """Load product list"""
+    """Load products with package size and brand"""
     try:
         engine = get_db_engine()
         query = text("""
@@ -138,13 +133,42 @@ def load_products():
         ORDER BY p.pt_code
         """)
         with engine.connect() as conn:
-            return pd.read_sql(query, conn)
+            df = pd.read_sql(query, conn)
+            # Pre-format display text
+            df['display_text'] = df.apply(lambda row: format_product_display(row), axis=1)
+            return df
     except Exception as e:
         st.error(f"Error loading products: {e}")
         return pd.DataFrame()
 
+def format_product_display(row):
+    """Format: PT_CODE | Name | Package (Brand)"""
+    pt_code = str(row['pt_code'])
+    
+    # Truncate name
+    name = str(row['name']) if pd.notna(row['name']) else ""
+    name = name[:35] + "..." if len(name) > 35 else name
+    
+    # Package size
+    pkg = str(row['package_size']) if pd.notna(row['package_size']) else ""
+    pkg = pkg[:20] + "..." if len(pkg) > 20 else pkg
+    
+    # Brand
+    brand = str(row['brand_name']) if pd.notna(row['brand_name']) else ""
+    
+    # Build display
+    display = f"{pt_code} | {name}"
+    if pkg and brand:
+        display += f" | {pkg} ({brand})"
+    elif pkg:
+        display += f" | {pkg}"
+    elif brand:
+        display += f" ({brand})"
+    
+    return display
+
 def get_quick_stats():
-    """Get quick statistics for dashboard"""
+    """Get dashboard statistics"""
     try:
         engine = get_db_engine()
         query = text("""
@@ -160,12 +184,31 @@ def get_quick_stats():
         LEFT JOIN safety_stock_parameters ssp ON s.id = ssp.safety_stock_level_id
         WHERE s.delete_flag = 0 AND s.is_active = 1
         """)
-        
         with engine.connect() as conn:
             return conn.execute(query).fetchone()
     except Exception as e:
         logger.error(f"Error getting stats: {e}")
         return None
+
+def safe_int(value, default=0):
+    """Safely convert to Python int"""
+    try:
+        if pd.isna(value):
+            return default
+        if hasattr(value, 'item'):  # numpy types
+            return int(value.item())
+        return int(value)
+    except:
+        return default
+
+def safe_float(value, default=0.0):
+    """Safely convert to float"""
+    try:
+        if value is None or pd.isna(value):
+            return default
+        return float(value)
+    except:
+        return default
 
 # ==================== Dialog Functions ====================
 
@@ -173,26 +216,11 @@ def get_quick_stats():
 def safety_stock_form(mode='add', record_id=None):
     """Add/Edit safety stock dialog"""
     
-    # Clean up any stale session state on dialog open
-    if 'dialog_initialized' not in st.session_state:
-        # Clear old calculation method form fields
-        keys_to_clear = [
-            'form_safety_days', 'form_avg_demand', 'form_lead_time', 
-            'form_service_level', 'form_std_dev',
-            'form_safety_days_dos', 'form_avg_demand_dos',
-            'form_lead_time_ltb', 'form_service_level_ltb', 'form_std_dev_ltb'
-        ]
-        for key in keys_to_clear:
-            if key in st.session_state:
-                del st.session_state[key]
-        st.session_state.dialog_initialized = True
-    
-    # Load data for edit mode
+    # Load data
     existing_data = {}
     if mode == 'edit' and record_id:
         existing_data = get_safety_stock_by_id(record_id) or {}
     
-    # Load reference data
     entities = load_entities()
     customers = load_customers()
     products = load_products()
@@ -203,7 +231,7 @@ def safety_stock_form(mode='add', record_id=None):
     
     st.markdown(f"### {'Edit' if mode == 'edit' else 'Add New'} Safety Stock")
     
-    # Create tabs for organized input
+    # Tabs
     tab1, tab2, tab3 = st.tabs(["Basic Information", "Stock Levels", "Calculation Method"])
     
     with tab1:
@@ -212,17 +240,22 @@ def safety_stock_form(mode='add', record_id=None):
         with col1:
             # Product selection
             if mode == 'add':
-                product_options = products['pt_code'] + ' - ' + products['name']
+                # Use only top 200 products for performance
+                display_products = products.head(200)
+                
                 selected_product = st.selectbox(
-                    "Product *",
-                    options=range(len(products)),
-                    format_func=lambda x: product_options.iloc[x]
+                    "Product * (type to search)",
+                    options=range(len(display_products)),
+                    format_func=lambda x: display_products.iloc[x]['display_text'] if x < len(display_products) else "",
+                    help="Start typing PT code, name, package size, or brand to filter"
                 )
-                product_id = products.iloc[selected_product]['id']
+                product_id = display_products.iloc[selected_product]['id']
+                
+                st.caption(f"Showing {len(display_products)} products")
             else:
                 st.text_input(
                     "Product",
-                    value=f"{existing_data.get('pt_code', '')} - {existing_data.get('product_name', '')}",
+                    value=f"{existing_data.get('pt_code', '')} | {existing_data.get('product_name', '')}",
                     disabled=True
                 )
                 product_id = existing_data['product_id']
@@ -232,30 +265,34 @@ def safety_stock_form(mode='add', record_id=None):
             entity_idx = 0
             if mode == 'edit' and existing_data.get('entity_id'):
                 try:
-                    entity_idx = entities[entities['id'] == existing_data['entity_id']].index[0]
-                except:
-                    pass
+                    matches = entities[entities['id'] == existing_data['entity_id']]
+                    if not matches.empty:
+                        entity_idx = safe_int(matches.index[0])
+                except Exception as e:
+                    logger.error(f"Error finding entity: {e}")
             
             selected_entity = st.selectbox(
                 "Entity *",
                 options=range(len(entities)),
                 format_func=lambda x: entity_options.iloc[x],
-                index=int(entity_idx),
+                index=entity_idx,
                 disabled=(mode == 'edit')
             )
             entity_id = entities.iloc[selected_entity]['id']
         
         with col2:
-            # Customer selection (optional)
+            # Customer selection
             customer_options = ['General Rule (All Customers)'] + \
                               (customers['company_code'] + ' - ' + customers['english_name']).tolist()
             
             customer_idx = 0
             if mode == 'edit' and existing_data.get('customer_id'):
                 try:
-                    customer_idx = customers[customers['id'] == existing_data['customer_id']].index[0] + 1
-                except:
-                    pass
+                    matches = customers[customers['id'] == existing_data['customer_id']]
+                    if not matches.empty:
+                        customer_idx = safe_int(matches.index[0]) + 1
+                except Exception as e:
+                    logger.error(f"Error finding customer: {e}")
             
             selected_customer = st.selectbox(
                 "Customer (Optional)",
@@ -266,15 +303,16 @@ def safety_stock_form(mode='add', record_id=None):
             customer_id = None if selected_customer == 0 else customers.iloc[selected_customer - 1]['id']
             
             # Priority
+            default_priority = 100 if customer_id is None else 50
             priority_level = st.number_input(
                 "Priority Level",
                 min_value=1,
                 max_value=9999,
-                value=existing_data.get('priority_level', 100 if customer_id is None else 50),
-                help="Lower number = higher priority. Customer rules should be ≤500"
+                value=safe_int(existing_data.get('priority_level', default_priority)),
+                help="Lower = higher priority. Customer rules ≤ 500"
             )
         
-        # Date range
+        # Dates
         col1, col2 = st.columns(2)
         with col1:
             effective_from = st.date_input(
@@ -287,18 +325,18 @@ def safety_stock_form(mode='add', record_id=None):
                 value=existing_data.get('effective_to')
             )
         
-        # Business notes
+        # Notes
         business_notes = st.text_area(
             "Business Notes",
-            value=existing_data.get('business_notes', '')
+            value=existing_data.get('business_notes', ''),
+            height=100
         )
     
     with tab2:
         col1, col2 = st.columns(2)
         
         with col1:
-            # Check for calculated value to use as default
-            default_ss_qty = float(existing_data.get('safety_stock_qty', 0))
+            default_ss_qty = safe_float(existing_data.get('safety_stock_qty', 0))
             if 'calculated_safety_stock' in st.session_state:
                 default_ss_qty = st.session_state.calculated_safety_stock
             
@@ -306,79 +344,72 @@ def safety_stock_form(mode='add', record_id=None):
                 "Safety Stock Quantity *",
                 min_value=0.0,
                 value=default_ss_qty,
-                step=1.0,
-                key="form_safety_stock"
+                step=1.0
             )
             
             min_stock_qty = st.number_input(
-                "Minimum Stock (Optional)",
+                "Minimum Stock",
                 min_value=0.0,
-                value=float(existing_data.get('min_stock_qty', 0)) if existing_data.get('min_stock_qty') else 0.0,
+                value=safe_float(existing_data.get('min_stock_qty')),
                 step=1.0
             )
             
             max_stock_qty = st.number_input(
-                "Maximum Stock (Optional)",
+                "Maximum Stock",
                 min_value=0.0,
-                value=float(existing_data.get('max_stock_qty', 0)) if existing_data.get('max_stock_qty') else 0.0,
+                value=safe_float(existing_data.get('max_stock_qty')),
                 step=1.0
             )
         
         with col2:
             reorder_point = st.number_input(
-                "Reorder Point (Optional)",
+                "Reorder Point",
                 min_value=0.0,
-                value=float(existing_data.get('reorder_point', 0)) if existing_data.get('reorder_point') else 0.0,
+                value=safe_float(existing_data.get('reorder_point')),
                 step=1.0
             )
             
             reorder_qty = st.number_input(
-                "Reorder Quantity (Optional)",
+                "Reorder Quantity",
                 min_value=0.0,
-                value=float(existing_data.get('reorder_qty', 0)) if existing_data.get('reorder_qty') else 0.0,
+                value=safe_float(existing_data.get('reorder_qty')),
                 step=1.0
             )
             
             if 'calculated_safety_stock' in st.session_state:
-                st.info(f"💡 Using calculated value: {st.session_state.calculated_safety_stock:.2f}")
-                if st.button("Clear Calculated Value"):
+                st.info(f"Calculated: {st.session_state.calculated_safety_stock:.2f}")
+                if st.button("Clear"):
                     del st.session_state.calculated_safety_stock
                     st.rerun()
     
     with tab3:
-        calculation_methods = ['FIXED', 'DAYS_OF_SUPPLY', 'DEMAND_PERCENTAGE', 
-                             'LEAD_TIME_BASED', 'MIN_MAX', 'STATISTICAL']
+        methods = ['FIXED', 'DAYS_OF_SUPPLY', 'LEAD_TIME_BASED']
         
         current_method = existing_data.get('calculation_method', 'FIXED')
-        method_idx = calculation_methods.index(current_method) if current_method in calculation_methods else 0
+        method_idx = methods.index(current_method) if current_method in methods else 0
         
-        # Use a key for the selectbox to track state properly
         calculation_method = st.selectbox(
             "Calculation Method",
-            options=calculation_methods,
+            options=methods,
             index=method_idx,
-            key="calc_method_select"
+            help="FIXED: Manual input | DAYS_OF_SUPPLY: Days × Demand | LEAD_TIME_BASED: Statistical with service level"
         )
         
-        # Store method parameters
         calc_params = {}
         
-        # Show method-specific parameters based on current selection
         if calculation_method == 'DAYS_OF_SUPPLY':
             col1, col2 = st.columns(2)
             with col1:
                 calc_params['safety_days'] = st.number_input(
                     "Safety Days",
                     min_value=1,
-                    value=int(existing_data.get('safety_days', 14)),
-                    key="form_safety_days_dos"  # Unique key per method
+                    value=safe_int(existing_data.get('safety_days', 14))
                 )
             with col2:
                 calc_params['avg_daily_demand'] = st.number_input(
-                    "Average Daily Demand",
+                    "Avg Daily Demand",
                     min_value=0.0,
-                    value=float(existing_data.get('avg_daily_demand', 0)),
-                    key="form_avg_demand_dos"
+                    value=safe_float(existing_data.get('avg_daily_demand'))
                 )
         
         elif calculation_method == 'LEAD_TIME_BASED':
@@ -387,26 +418,22 @@ def safety_stock_form(mode='add', record_id=None):
                 calc_params['lead_time_days'] = st.number_input(
                     "Lead Time (days)",
                     min_value=1,
-                    value=int(existing_data.get('lead_time_days', 7)),
-                    key="form_lead_time_ltb"
+                    value=safe_int(existing_data.get('lead_time_days', 7))
                 )
                 calc_params['service_level_percent'] = st.selectbox(
                     "Service Level %",
                     options=list(Z_SCORE_MAP.keys()),
-                    index=4,  # Default to 95%
-                    key="form_service_level_ltb"
+                    index=4
                 )
             with col2:
                 calc_params['demand_std_deviation'] = st.number_input(
-                    "Demand Std Deviation",
+                    "Demand Std Dev",
                     min_value=0.0,
-                    value=float(existing_data.get('demand_std_deviation', 0)),
-                    key="form_std_dev_ltb"
+                    value=safe_float(existing_data.get('demand_std_deviation'))
                 )
         
-        # Calculate button
         if calculation_method != 'FIXED':
-            if st.button("📊 Calculate Safety Stock", type="primary"):
+            if st.button("Calculate", type="primary"):
                 params = {
                     'product_id': product_id,
                     'entity_id': entity_id,
@@ -418,18 +445,18 @@ def safety_stock_form(mode='add', record_id=None):
                 
                 if 'error' not in result:
                     st.session_state.calculated_safety_stock = result['safety_stock_qty']
-                    st.success(f"Calculated: {result['safety_stock_qty']:.2f} units")
-                    st.info(f"Formula: {result['formula_used']}")
-                    st.warning("Please update the Safety Stock Quantity in the Stock Levels tab")
+                    st.success(f"Result: {result['safety_stock_qty']:.2f}")
+                    st.info(result['formula_used'])
+                    st.rerun()
                 else:
                     st.error(result['error'])
     
-    # Action buttons
-    col1, col2, col3 = st.columns(3)
+    # Buttons
+    st.divider()
+    col1, col2, col3 = st.columns([1, 1, 2])
     
     with col1:
-        if st.button("💾 Save", type="primary"):
-            # Prepare data
+        if st.button("Save", type="primary", use_container_width=True):
             data = {
                 'product_id': product_id,
                 'entity_id': entity_id,
@@ -448,7 +475,6 @@ def safety_stock_form(mode='add', record_id=None):
                 **calc_params
             }
             
-            # Validate
             is_valid, errors = validate_safety_stock_data(
                 data, 
                 mode=mode,
@@ -462,12 +488,10 @@ def safety_stock_form(mode='add', record_id=None):
                     success, result = update_safety_stock(record_id, data, st.session_state.username)
                 
                 if success:
-                    # Clean up session state
                     if 'calculated_safety_stock' in st.session_state:
                         del st.session_state.calculated_safety_stock
-                    if 'dialog_initialized' in st.session_state:
-                        del st.session_state.dialog_initialized
-                    st.success(f"✅ Safety stock {'created' if mode == 'add' else 'updated'} successfully!")
+                    st.success(f"{'Created' if mode == 'add' else 'Updated'} successfully!")
+                    st.cache_data.clear()
                     st.rerun()
                 else:
                     st.error(f"Error: {result}")
@@ -475,17 +499,15 @@ def safety_stock_form(mode='add', record_id=None):
                 st.error(get_validation_summary(errors))
     
     with col2:
-        if mode == 'edit' and st.button("📝 Create Review"):
-            review_dialog(record_id)
-    
-    with col3:
-        if st.button("❌ Cancel"):
-            # Clean up session state
+        if st.button("Cancel", use_container_width=True):
             if 'calculated_safety_stock' in st.session_state:
                 del st.session_state.calculated_safety_stock
-            if 'dialog_initialized' in st.session_state:
-                del st.session_state.dialog_initialized
             st.rerun()
+    
+    with col3:
+        if mode == 'edit':
+            if st.button("Create Review", use_container_width=True):
+                review_dialog(record_id)
 
 
 @st.dialog("Review Safety Stock", width="large")
@@ -499,12 +521,12 @@ def review_dialog(safety_stock_id):
     
     st.markdown("### Safety Stock Review")
     
-    # Display current information
+    # Current info
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Product", current_data.get('pt_code', 'N/A'))
     with col2:
-        st.metric("Current Safety Stock", f"{current_data['safety_stock_qty']:.0f}")
+        st.metric("Current Safety Stock", f"{safe_float(current_data.get('safety_stock_qty')):.0f}")
     with col3:
         st.metric("Method", current_data.get('calculation_method', 'FIXED'))
     
@@ -525,7 +547,7 @@ def review_dialog(safety_stock_id):
         avg_daily_demand = st.number_input(
             "Actual Avg Daily Demand",
             min_value=0.0,
-            value=float(current_data.get('avg_daily_demand', 0))
+            value=safe_float(current_data.get('avg_daily_demand'))
         )
     
     with col2:
@@ -535,17 +557,16 @@ def review_dialog(safety_stock_id):
     
     st.divider()
     
-    # Adjustment section
+    # Adjustment
     st.subheader("Adjustment")
-    
     col1, col2 = st.columns(2)
+    
     with col1:
         new_safety_stock_qty = st.number_input(
             "New Safety Stock Quantity",
             min_value=0.0,
-            value=float(current_data['safety_stock_qty'])
+            value=safe_float(current_data.get('safety_stock_qty'))
         )
-        
         action_taken = st.selectbox(
             "Action",
             options=['NO_CHANGE', 'INCREASED', 'DECREASED', 'METHOD_CHANGED']
@@ -560,12 +581,11 @@ def review_dialog(safety_stock_id):
     
     review_notes = st.text_area("Review Notes")
     
-    # Submit button
-    if st.button("💾 Submit Review", type="primary"):
+    if st.button("Submit Review", type="primary"):
         review_data = {
             'review_date': datetime.now().date(),
             'review_type': 'PERIODIC',
-            'old_safety_stock_qty': current_data['safety_stock_qty'],
+            'old_safety_stock_qty': safe_float(current_data.get('safety_stock_qty')),
             'new_safety_stock_qty': new_safety_stock_qty,
             'avg_daily_demand': avg_daily_demand,
             'stockout_incidents': stockout_incidents,
@@ -586,11 +606,12 @@ def review_dialog(safety_stock_id):
         )
         
         if success:
-            if new_safety_stock_qty != current_data['safety_stock_qty']:
+            if new_safety_stock_qty != safe_float(current_data.get('safety_stock_qty')):
                 update_data = {'safety_stock_qty': new_safety_stock_qty}
                 update_safety_stock(safety_stock_id, update_data, st.session_state.username)
             
-            st.success("✅ Review submitted successfully!")
+            st.success("Review submitted successfully!")
+            st.cache_data.clear()
             st.rerun()
         else:
             st.error(f"Error: {message}")
@@ -602,114 +623,101 @@ def bulk_upload_dialog():
     
     st.markdown("### Bulk Upload Safety Stock")
     
-    # Download template
-    if st.button("📥 Download Template"):
-        template = create_upload_template(include_sample_data=True)
-        st.download_button(
-            label="💾 Save Template",
-            data=template,
-            file_name=f"safety_stock_template_{datetime.now().strftime('%Y%m%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        if st.button("Download Template", use_container_width=True):
+            template = create_upload_template(include_sample_data=True)
+            st.download_button(
+                label="Save Template",
+                data=template,
+                file_name=f"safety_stock_template_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
+            )
     
-    # Upload file
+    st.divider()
+    
     uploaded_file = st.file_uploader("Choose Excel file", type=['xlsx', 'xls'])
     
     if uploaded_file:
         try:
-            df = pd.read_excel(uploaded_file)
+            with st.spinner("Reading file..."):
+                df = pd.read_excel(uploaded_file)
             
-            # Remove instruction row if present
             if df.iloc[0].astype(str).str.contains('Required|Optional').any():
                 df = df.iloc[1:].reset_index(drop=True)
             
-            st.info(f"Found {len(df)} rows to import")
-            
-            # Preview
-            st.subheader("Preview")
+            st.info(f"Found {len(df)} rows")
             st.dataframe(df.head(10), use_container_width=True)
             
-            # Validate
-            is_valid, validated_df, errors = validate_bulk_data(df)
+            with st.spinner("Validating..."):
+                is_valid, validated_df, errors = validate_bulk_data(df)
             
             if not is_valid:
                 st.error("Validation failed:")
                 for error in errors[:10]:
                     st.write(f"• {error}")
             else:
-                st.success("✅ Validation passed")
+                st.success("Validation passed")
                 
-                if st.button("📤 Import Data", type="primary"):
-                    data_list = validated_df.to_dict('records')
-                    success, message, results = bulk_create_safety_stock(
-                        data_list,
-                        st.session_state.username
-                    )
+                if st.button("Import Data", type="primary"):
+                    with st.spinner("Importing..."):
+                        data_list = validated_df.to_dict('records')
+                        success, message, results = bulk_create_safety_stock(
+                            data_list,
+                            st.session_state.username
+                        )
                     
                     if success:
-                        st.success(f"✅ {message}")
+                        st.success(message)
                         if results['failed'] > 0:
-                            st.warning(f"Failed to create {results['failed']} records")
-                            with st.expander("Error details"):
+                            with st.expander("Errors"):
                                 for error in results['errors']:
                                     st.write(f"• {error}")
+                        st.cache_data.clear()
                         st.rerun()
                     else:
-                        st.error(f"Import failed: {message}")
+                        st.error(f"Failed: {message}")
         
         except Exception as e:
-            st.error(f"Error reading file: {e}")
+            st.error(f"Error: {e}")
 
 
-# ==================== Main Page Layout ====================
+# ==================== Main Page ====================
 
 def main():
-    # Header
     st.title("📦 Safety Stock Management")
     
-    # Top metrics row
+    # Stats
     stats = get_quick_stats()
     if stats:
         col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Active Rules", stats.total_items)
+            st.metric("Active Rules", stats.total_items or 0)
         with col2:
-            st.metric("Customer Rules", stats.customer_rules)
+            st.metric("Customer Rules", stats.customer_rules or 0)
         with col3:
-            st.metric("Needs Review", stats.needs_review)
+            st.metric("Needs Review", stats.needs_review or 0)
         with col4:
-            st.metric("Unique Products", stats.unique_products)
+            st.metric("Unique Products", stats.unique_products or 0)
     
     st.divider()
     
-    # Filters section
+    # Filters
     with st.container():
         st.subheader("Filters")
-        
         col1, col2, col3, col4 = st.columns(4)
         
         with col1:
             entities = load_entities()
-            entity_options = ['All Entities'] + (entities['company_code'] + ' - ' + entities['english_name']).tolist()
-            
-            selected_entity = st.selectbox(
-                "Entity",
-                options=range(len(entity_options)),
-                format_func=lambda x: entity_options[x]
-            )
-            
+            entity_opts = ['All Entities'] + (entities['company_code'] + ' - ' + entities['english_name']).tolist()
+            selected_entity = st.selectbox("Entity", range(len(entity_opts)), format_func=lambda x: entity_opts[x])
             st.session_state.ss_filters['entity_id'] = entities.iloc[selected_entity - 1]['id'] if selected_entity > 0 else None
         
         with col2:
             customers = load_customers()
-            customer_options = ['All Customers', 'General Rules Only'] + \
-                             (customers['company_code'] + ' - ' + customers['english_name']).tolist()
-            
-            selected_customer = st.selectbox(
-                "Customer",
-                options=range(len(customer_options)),
-                format_func=lambda x: customer_options[x]
-            )
+            customer_opts = ['All Customers', 'General Rules Only'] + (customers['company_code'] + ' - ' + customers['english_name']).tolist()
+            selected_customer = st.selectbox("Customer", range(len(customer_opts)), format_func=lambda x: customer_opts[x])
             
             if selected_customer == 0:
                 st.session_state.ss_filters['customer_id'] = None
@@ -719,41 +727,27 @@ def main():
                 st.session_state.ss_filters['customer_id'] = customers.iloc[selected_customer - 2]['id']
         
         with col3:
-            product_search = st.text_input(
-                "Product Search",
-                placeholder="PT Code or Name",
-                value=st.session_state.ss_filters['product_search']
-            )
+            product_search = st.text_input("Product Search", placeholder="PT Code or Name", value=st.session_state.ss_filters['product_search'])
             st.session_state.ss_filters['product_search'] = product_search
         
         with col4:
-            status = st.selectbox(
-                "Status",
-                options=['active', 'all', 'expired', 'future'],
-                format_func=lambda x: x.title()
-            )
+            status = st.selectbox("Status", ['active', 'all', 'expired', 'future'], format_func=lambda x: x.title())
             st.session_state.ss_filters['status'] = status
     
-    # Action buttons
+    # Actions
     st.divider()
-    
     col1, col2, col3, col4, col5 = st.columns(5)
     
     with col1:
-        if st.button("➕ Add Safety Stock", type="primary"):
-            # Clean up any previous dialog state
-            if 'dialog_initialized' in st.session_state:
-                del st.session_state.dialog_initialized
-            if 'calc_method_select' in st.session_state:
-                del st.session_state.calc_method_select
+        if st.button("Add Safety Stock", type="primary", use_container_width=True):
             safety_stock_form('add')
     
     with col2:
-        if st.button("📤 Bulk Upload"):
+        if st.button("Bulk Upload", use_container_width=True):
             bulk_upload_dialog()
     
     with col3:
-        if st.button("📥 Export to Excel"):
+        if st.button("Export Excel", use_container_width=True):
             df = get_safety_stock_levels(
                 entity_id=st.session_state.ss_filters['entity_id'],
                 customer_id=None if st.session_state.ss_filters['customer_id'] == 'general' else st.session_state.ss_filters['customer_id'],
@@ -764,33 +758,34 @@ def main():
             if not df.empty:
                 excel_file = export_to_excel(df)
                 st.download_button(
-                    label="💾 Download Excel",
-                    data=excel_file,
-                    file_name=f"safety_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    "Download",
+                    excel_file,
+                    f"safety_stock_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
                 )
             else:
-                st.warning("No data to export")
+                st.warning("No data")
     
     with col4:
-        if st.button("📊 Review Report"):
+        if st.button("Review Report", use_container_width=True):
             report = generate_review_report()
             st.download_button(
-                label="💾 Download Report",
-                data=report,
-                file_name=f"safety_stock_review_{datetime.now().strftime('%Y%m%d')}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                "Download",
+                report,
+                f"review_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True
             )
     
     with col5:
-        if st.button("🔄 Refresh"):
+        if st.button("Refresh", use_container_width=True):
             st.cache_data.clear()
             st.rerun()
     
-    # Main data table
+    # Data table
     st.divider()
     
-    # Load data
     df = get_safety_stock_levels(
         entity_id=st.session_state.ss_filters['entity_id'],
         customer_id=None if st.session_state.ss_filters['customer_id'] == 'general' else st.session_state.ss_filters['customer_id'],
@@ -799,21 +794,18 @@ def main():
     )
     
     if df.empty:
-        st.info("No safety stock records found. Click '➕ Add Safety Stock' to create one.")
+        st.info("No records found")
     else:
-        # Display columns
-        display_columns = [
+        display_cols = [
             'pt_code', 'product_name', 'entity_code', 'customer_code',
             'safety_stock_qty', 'min_stock_qty', 'max_stock_qty',
             'reorder_point', 'calculation_method', 'rule_type', 
             'status', 'effective_from', 'priority_level'
         ]
         
-        # Format display
-        display_df = df[display_columns].copy()
+        display_df = df[display_cols].copy()
         display_df['customer_code'] = display_df['customer_code'].fillna('All')
         
-        # Show data table with selection
         st.subheader(f"Safety Stock Rules ({len(df)} records)")
         
         selected = st.dataframe(
@@ -824,51 +816,42 @@ def main():
             on_select="rerun"
         )
         
-        # Handle row selection
         if selected and selected.selection.rows:
-            selected_idx = selected.selection.rows[0]
-            selected_record = df.iloc[selected_idx]
+            idx = selected.selection.rows[0]
+            record = df.iloc[idx]
             
             st.divider()
-            st.subheader("Selected Record Actions")
+            st.subheader("Actions")
             
             col1, col2, col3, col4 = st.columns(4)
             
             with col1:
-                if st.button("✏️ Edit"):
-                    # Clean up any previous dialog state
-                    if 'dialog_initialized' in st.session_state:
-                        del st.session_state.dialog_initialized
-                    if 'calc_method_select' in st.session_state:
-                        del st.session_state.calc_method_select
-                    safety_stock_form('edit', selected_record['id'])
+                if st.button("Edit", use_container_width=True):
+                    safety_stock_form('edit', record['id'])
             
             with col2:
-                if st.button("📝 Review"):
-                    review_dialog(selected_record['id'])
+                if st.button("Review", use_container_width=True):
+                    review_dialog(record['id'])
             
             with col3:
-                if st.button("📜 History"):
-                    history_df = get_review_history(selected_record['id'])
-                    if not history_df.empty:
-                        st.dataframe(history_df, use_container_width=True)
+                if st.button("History", use_container_width=True):
+                    history = get_review_history(record['id'])
+                    if not history.empty:
+                        st.dataframe(history, use_container_width=True)
                     else:
-                        st.info("No review history found")
+                        st.info("No history")
             
             with col4:
-                if st.button("🗑️ Delete", type="secondary"):
+                if st.button("Delete", type="secondary", use_container_width=True):
                     if st.checkbox("Confirm delete?"):
-                        success, message = delete_safety_stock(
-                            selected_record['id'],
-                            st.session_state.username
-                        )
+                        success, msg = delete_safety_stock(record['id'], st.session_state.username)
                         if success:
-                            st.success("✅ Deleted successfully")
+                            st.success("Deleted")
+                            st.cache_data.clear()
                             st.rerun()
                         else:
-                            st.error(f"Error: {message}")
+                            st.error(msg)
 
 
-# Run main function
 if __name__ == "__main__":
     main()

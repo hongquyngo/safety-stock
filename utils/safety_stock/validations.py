@@ -1,7 +1,7 @@
 # utils/safety_stock/validations.py
 """
 Validation functions for Safety Stock Management
-Handles input validation, business rules, and data integrity checks
+Updated to support only 3 calculation methods
 """
 
 import pandas as pd
@@ -14,21 +14,10 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-# ==================== Core Validation Functions ====================
-
 def validate_quantities(data: Dict) -> Tuple[bool, List[str]]:
-    """
-    Validate quantity fields according to business rules
-    
-    Args:
-        data: Dictionary containing quantity fields
-    
-    Returns:
-        Tuple of (is_valid, error_messages)
-    """
+    """Validate quantity fields according to business rules"""
     errors = []
     
-    # Safety stock is required and must be non-negative
     safety_stock = data.get('safety_stock_qty')
     if safety_stock is None:
         errors.append("Safety stock quantity is required")
@@ -37,20 +26,17 @@ def validate_quantities(data: Dict) -> Tuple[bool, List[str]]:
     if safety_stock < 0:
         errors.append("Safety stock quantity cannot be negative")
     
-    # Validate optional quantities
     min_stock = data.get('min_stock_qty')
     max_stock = data.get('max_stock_qty')
     reorder_point = data.get('reorder_point')
     reorder_qty = data.get('reorder_qty')
     
-    # Min stock validation
     if min_stock is not None:
         if min_stock < 0:
             errors.append("Minimum stock quantity cannot be negative")
         elif min_stock > safety_stock:
             errors.append("Minimum stock cannot exceed safety stock")
     
-    # Max stock validation
     if max_stock is not None:
         if max_stock < 0:
             errors.append("Maximum stock quantity cannot be negative")
@@ -59,14 +45,12 @@ def validate_quantities(data: Dict) -> Tuple[bool, List[str]]:
         elif min_stock is not None and max_stock < min_stock:
             errors.append("Maximum stock cannot be less than minimum stock")
     
-    # Reorder point validation
     if reorder_point is not None:
         if reorder_point < 0:
             errors.append("Reorder point cannot be negative")
         elif reorder_point < safety_stock:
             errors.append("Reorder point should not be less than safety stock")
     
-    # Reorder quantity validation
     if reorder_qty is not None and reorder_qty <= 0:
         errors.append("Reorder quantity must be positive")
     
@@ -74,32 +58,21 @@ def validate_quantities(data: Dict) -> Tuple[bool, List[str]]:
 
 
 def validate_dates(data: Dict) -> Tuple[bool, List[str]]:
-    """
-    Validate date fields
-    
-    Args:
-        data: Dictionary containing date fields
-    
-    Returns:
-        Tuple of (is_valid, error_messages)
-    """
+    """Validate date fields"""
     errors = []
     
     effective_from = data.get('effective_from')
     effective_to = data.get('effective_to')
     
-    # Effective from is required
     if not effective_from:
         errors.append("Effective from date is required")
         return False, errors
     
-    # Convert to date if datetime
     if isinstance(effective_from, datetime):
         effective_from = effective_from.date()
     if isinstance(effective_to, datetime):
         effective_to = effective_to.date()
     
-    # Validate date range
     min_allowed_date = date(2020, 1, 1)
     if effective_from < min_allowed_date:
         errors.append(f"Effective from date cannot be before {min_allowed_date}")
@@ -112,16 +85,7 @@ def validate_dates(data: Dict) -> Tuple[bool, List[str]]:
 
 
 def validate_priority(priority_level: int, is_customer_specific: bool) -> Tuple[bool, List[str]]:
-    """
-    Validate priority level
-    
-    Args:
-        priority_level: Priority value (lower = higher priority)
-        is_customer_specific: Whether this is a customer-specific rule
-    
-    Returns:
-        Tuple of (is_valid, error_messages)
-    """
+    """Validate priority level"""
     errors = []
     
     if priority_level < 0:
@@ -136,16 +100,16 @@ def validate_priority(priority_level: int, is_customer_specific: bool) -> Tuple[
 
 def validate_calculation_parameters(method: str, params: Dict) -> Tuple[bool, List[str]]:
     """
-    Validate parameters for specific calculation methods
-    
-    Args:
-        method: Calculation method name
-        params: Method parameters
-    
-    Returns:
-        Tuple of (is_valid, error_messages)
+    Validate parameters for calculation methods
+    Updated for 3 methods only: FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED
     """
     errors = []
+    
+    # Validate method name
+    valid_methods = ['FIXED', 'DAYS_OF_SUPPLY', 'LEAD_TIME_BASED']
+    if method not in valid_methods:
+        errors.append(f"Invalid calculation method: {method}. Must be one of: {', '.join(valid_methods)}")
+        return False, errors
     
     if method == 'FIXED':
         # No additional validation needed
@@ -156,47 +120,40 @@ def validate_calculation_parameters(method: str, params: Dict) -> Tuple[bool, Li
             errors.append("Safety days is required for DAYS_OF_SUPPLY method")
         elif params['safety_days'] <= 0:
             errors.append("Safety days must be positive")
-    
-    elif method == 'DEMAND_PERCENTAGE':
-        percentage = params.get('demand_percentage')
-        if not percentage:
-            errors.append("Demand percentage is required for DEMAND_PERCENTAGE method")
-        elif percentage <= 0 or percentage > 100:
-            errors.append("Demand percentage must be between 0 and 100")
+        elif params['safety_days'] > 365:
+            errors.append("Safety days seems too high (>365 days)")
+        
+        # avg_daily_demand is optional (can be calculated from history)
+        if params.get('avg_daily_demand') is not None:
+            if params['avg_daily_demand'] < 0:
+                errors.append("Average daily demand cannot be negative")
     
     elif method == 'LEAD_TIME_BASED':
         if not params.get('lead_time_days'):
             errors.append("Lead time is required for LEAD_TIME_BASED method")
         elif params['lead_time_days'] <= 0:
             errors.append("Lead time must be positive")
+        elif params['lead_time_days'] > 365:
+            errors.append("Lead time seems too long (>365 days)")
         
         service_level = params.get('service_level_percent')
         if not service_level:
             errors.append("Service level is required for LEAD_TIME_BASED method")
         elif service_level < 50 or service_level > 99.9:
             errors.append("Service level must be between 50% and 99.9%")
-    
-    elif method == 'MIN_MAX':
-        if not params.get('min_stock_qty'):
-            errors.append("Minimum stock is required for MIN_MAX method")
-        if not params.get('max_stock_qty'):
-            errors.append("Maximum stock is required for MIN_MAX method")
-        if params.get('min_stock_qty') and params.get('max_stock_qty'):
-            if params['min_stock_qty'] >= params['max_stock_qty']:
-                errors.append("Maximum stock must be greater than minimum stock")
-    
-    elif method == 'STATISTICAL':
-        if params.get('historical_days', 90) < 30:
-            errors.append("Statistical method requires at least 30 days of history")
-    
-    elif method not in ['FIXED', 'DAYS_OF_SUPPLY', 'DEMAND_PERCENTAGE', 
-                        'LEAD_TIME_BASED', 'MIN_MAX', 'STATISTICAL']:
-        errors.append(f"Unknown calculation method: {method}")
+        
+        # demand_std_deviation is optional (can be calculated from history)
+        if params.get('demand_std_deviation') is not None:
+            if params['demand_std_deviation'] < 0:
+                errors.append("Demand standard deviation cannot be negative")
+        
+        # avg_daily_demand is optional
+        if params.get('avg_daily_demand') is not None:
+            if params['avg_daily_demand'] < 0:
+                errors.append("Average daily demand cannot be negative")
     
     return len(errors) == 0, errors
 
-
-# ==================== Database Validation Functions ====================
 
 def check_date_overlap(
     product_id: int,
@@ -206,24 +163,10 @@ def check_date_overlap(
     effective_to: Optional[date],
     exclude_id: Optional[int] = None
 ) -> Tuple[bool, List[Dict]]:
-    """
-    Check for overlapping date ranges for the same product/entity/customer
-    
-    Args:
-        product_id: Product ID
-        entity_id: Entity ID
-        customer_id: Customer ID (None for general rules)
-        effective_from: Start date
-        effective_to: End date (None for no end date)
-        exclude_id: Exclude this safety stock ID (for updates)
-    
-    Returns:
-        Tuple of (has_overlap, overlapping_records)
-    """
+    """Check for overlapping date ranges for the same product/entity/customer"""
     try:
         engine = get_db_engine()
         
-        # Build query
         query = text("""
         SELECT 
             id,
@@ -253,7 +196,7 @@ def check_date_overlap(
                 'customer_id': customer_id,
                 'effective_from': effective_from,
                 'effective_to': effective_to,
-                'exclude_id': exclude_id or -1  # Use -1 if no exclude_id
+                'exclude_id': exclude_id or -1
             }).fetchall()
         
         overlapping = [dict(row._mapping) for row in result]
@@ -268,28 +211,17 @@ def validate_entity_product(
     product_id: int,
     entity_id: int
 ) -> Tuple[bool, List[str]]:
-    """
-    Validate that product exists and entity is Internal company
-    
-    Args:
-        product_id: Product ID
-        entity_id: Entity ID
-    
-    Returns:
-        Tuple of (is_valid, error_messages)
-    """
+    """Validate that product exists and entity is Internal company"""
     errors = []
     
     try:
         engine = get_db_engine()
         
-        # Check product exists
         product_query = text("""
         SELECT id FROM products
         WHERE id = :product_id AND delete_flag = 0
         """)
         
-        # Check entity is Internal
         entity_query = text("""
         SELECT c.id
         FROM companies c
@@ -317,15 +249,7 @@ def validate_entity_product(
 
 
 def validate_customer(customer_id: int) -> Tuple[bool, List[str]]:
-    """
-    Validate that customer exists and is Customer type
-    
-    Args:
-        customer_id: Customer ID
-    
-    Returns:
-        Tuple of (is_valid, error_messages)
-    """
+    """Validate that customer exists and is Customer type"""
     errors = []
     
     try:
@@ -354,23 +278,14 @@ def validate_customer(customer_id: int) -> Tuple[bool, List[str]]:
     return len(errors) == 0, errors
 
 
-# ==================== Master Validation Function ====================
-
 def validate_safety_stock_data(
     data: Dict,
     mode: str = 'create',
     exclude_id: Optional[int] = None
 ) -> Tuple[bool, List[str]]:
     """
-    Master validation function that runs all applicable validations
-    
-    Args:
-        data: Safety stock data dictionary
-        mode: 'create' or 'update'
-        exclude_id: ID to exclude for overlap check (used in updates)
-    
-    Returns:
-        Tuple of (is_valid, error_messages)
+    Master validation function
+    Updated for 3 calculation methods only
     """
     all_errors = []
     
@@ -422,7 +337,7 @@ def validate_safety_stock_data(
         
         if has_overlap:
             overlap_info = []
-            for rec in overlapping[:3]:  # Show first 3 overlaps
+            for rec in overlapping[:3]:
                 date_range = f"{rec['effective_from']} to {rec['effective_to'] or 'ongoing'}"
                 overlap_info.append(f"ID {rec['id']} ({date_range})")
             all_errors.append(f"Date overlap with existing records: {'; '.join(overlap_info)}")
@@ -439,18 +354,8 @@ def validate_safety_stock_data(
     return len(all_errors) == 0, all_errors
 
 
-# ==================== Bulk Validation ====================
-
 def validate_bulk_data(df: pd.DataFrame) -> Tuple[bool, pd.DataFrame, List[str]]:
-    """
-    Validate bulk import data
-    
-    Args:
-        df: DataFrame with safety stock data to import
-    
-    Returns:
-        Tuple of (is_valid, validated_df, error_messages)
-    """
+    """Validate bulk import data"""
     errors = []
     validated_df = df.copy()
     
@@ -494,22 +399,12 @@ def validate_bulk_data(df: pd.DataFrame) -> Tuple[bool, pd.DataFrame, List[str]]
     return len(errors) == 0, validated_df, errors
 
 
-# ==================== Helper Functions ====================
-
 def get_validation_summary(errors: List[str]) -> str:
-    """
-    Format validation errors for display
-    
-    Args:
-        errors: List of error messages
-    
-    Returns:
-        Formatted error summary
-    """
+    """Format validation errors for display"""
     if not errors:
-        return "✅ All validations passed"
+        return "All validations passed"
     
-    summary = f"❌ Found {len(errors)} validation error(s):\n"
+    summary = f"Found {len(errors)} validation error(s):\n"
     for i, error in enumerate(errors, 1):
         summary += f"{i}. {error}\n"
     

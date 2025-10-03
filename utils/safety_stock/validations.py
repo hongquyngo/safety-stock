@@ -1,7 +1,7 @@
 # utils/safety_stock/validations.py
 """
 Validation functions for Safety Stock Management
-Version 2.2 - Updated to remove reorder_qty field
+Version 3.0 - Updated for merged calculation/stock levels with reorder point validation
 """
 
 import pandas as pd
@@ -46,14 +46,27 @@ def validate_safety_stock_data(
         elif data['safety_stock_qty'] > 999999:
             errors.append("Safety stock quantity is unreasonably large (max: 999,999)")
     
+    # 3. Validate reorder point
     if 'reorder_point' in data and data['reorder_point'] is not None:
         if data['reorder_point'] < 0:
             errors.append("Reorder point cannot be negative")
-        # Reorder point should be >= safety stock
-        if 'safety_stock_qty' in data and data['reorder_point'] < data['safety_stock_qty']:
-            errors.append("Reorder point should not be less than safety stock quantity")
+        
+        # Reorder point validation based on method
+        if 'calculation_method' in data and 'safety_stock_qty' in data:
+            method = data['calculation_method']
+            ss_qty = data['safety_stock_qty']
+            rop = data['reorder_point']
+            
+            # For calculated methods, ROP should typically be >= SS
+            if method in ['DAYS_OF_SUPPLY', 'LEAD_TIME_BASED']:
+                if rop < ss_qty:
+                    # This is a warning, not an error (user might have valid reason)
+                    logger.warning(f"Reorder point ({rop}) is less than safety stock ({ss_qty}) for {method} method")
+                    # Not adding to errors - just logging
+            
+            # For FIXED method, any relationship is acceptable (manual override)
     
-    # 3. Validate dates
+    # 4. Validate dates
     if 'effective_from' in data:
         effective_from = data['effective_from']
         if isinstance(effective_from, str):
@@ -85,7 +98,7 @@ def validate_safety_stock_data(
             if effective_to <= effective_from:
                 errors.append("Effective to date must be after effective from date")
     
-    # 4. Validate priority
+    # 5. Validate priority
     if 'priority_level' in data and data['priority_level'] is not None:
         if data['priority_level'] < 1:
             errors.append("Priority level must be at least 1")
@@ -96,7 +109,7 @@ def validate_safety_stock_data(
         if data.get('customer_id') and data['priority_level'] > 500:
             errors.append("Customer-specific rules should have priority level 500 or lower")
     
-    # 5. Validate calculation method parameters
+    # 6. Validate calculation method parameters
     if 'calculation_method' in data:
         method_errors = validate_calculation_parameters(
             data['calculation_method'],
@@ -104,7 +117,7 @@ def validate_safety_stock_data(
         )
         errors.extend(method_errors)
     
-    # 6. Check for existing duplicates
+    # 7. Check for existing duplicates
     if mode == 'create' or (mode == 'edit' and 'product_id' in data):
         duplicate_errors = check_for_duplicates(data, exclude_id)
         errors.extend(duplicate_errors)
@@ -136,9 +149,19 @@ def validate_calculation_parameters(method: str, data: Dict) -> List[str]:
             elif data['safety_days'] > 365:
                 errors.append("Safety days seems too high (>365 days)")
         
+        # Avg daily demand validation (optional for reference data approach)
         if 'avg_daily_demand' in data and data['avg_daily_demand'] is not None:
             if data['avg_daily_demand'] < 0:
                 errors.append("Average daily demand cannot be negative")
+            elif data['avg_daily_demand'] > 999999:
+                errors.append("Average daily demand seems unreasonably high")
+        
+        # Lead time validation for reorder point
+        if 'lead_time_days' in data and data['lead_time_days'] is not None:
+            if data['lead_time_days'] <= 0:
+                errors.append("Lead time must be positive")
+            elif data['lead_time_days'] > 365:
+                errors.append("Lead time seems too long (>365 days)")
     
     elif method == 'LEAD_TIME_BASED':
         if 'lead_time_days' in data:
@@ -156,6 +179,13 @@ def validate_calculation_parameters(method: str, data: Dict) -> List[str]:
         if 'demand_std_deviation' in data and data['demand_std_deviation'] is not None:
             if data['demand_std_deviation'] < 0:
                 errors.append("Demand standard deviation cannot be negative")
+            elif data['demand_std_deviation'] > 99999:
+                errors.append("Demand standard deviation seems unreasonably high")
+        
+        # Avg daily demand validation
+        if 'avg_daily_demand' in data and data['avg_daily_demand'] is not None:
+            if data['avg_daily_demand'] < 0:
+                errors.append("Average daily demand cannot be negative")
     
     return errors
 
@@ -358,6 +388,82 @@ def validate_review_data(review_data: Dict) -> Tuple[bool, List[str]]:
         errors.append(f"Invalid review type. Must be one of: {', '.join(valid_review_types)}")
     
     return len(errors) == 0, errors
+
+
+def validate_demand_data_quality(stats: Dict, min_data_points: int = 10) -> Tuple[bool, List[str]]:
+    """
+    Validate quality of auto-fetched demand data
+    
+    Args:
+        stats: Demand statistics dictionary from fetch_demand_stats()
+        min_data_points: Minimum required data points
+    
+    Returns:
+        Tuple of (is_acceptable, warnings)
+    """
+    warnings = []
+    
+    if stats['data_points'] < min_data_points:
+        warnings.append(f"Limited data: Only {stats['data_points']} data points (minimum recommended: {min_data_points})")
+    
+    if stats['cv_percent'] > 100:
+        warnings.append(f"Very high variability: CV={stats['cv_percent']:.1f}% - consider using FIXED method")
+    
+    if stats['avg_daily_demand'] == 0:
+        warnings.append("Zero average demand - manual input recommended")
+    
+    if stats['demand_std_dev'] > stats['avg_daily_demand'] * 2:
+        warnings.append("Standard deviation is very high compared to average - data may be unreliable")
+    
+    # Check if data is acceptable for calculations
+    is_acceptable = (
+        stats['data_points'] >= 5 and  # Absolute minimum
+        stats['avg_daily_demand'] > 0
+    )
+    
+    return is_acceptable, warnings
+
+
+def validate_reorder_parameters(
+    safety_stock_qty: float,
+    reorder_point: float,
+    avg_daily_demand: float,
+    lead_time_days: int,
+    method: str = 'FIXED'
+) -> List[str]:
+    """
+    Validate reorder point logic and parameters
+    
+    Args:
+        safety_stock_qty: Safety stock quantity
+        reorder_point: Reorder point
+        avg_daily_demand: Average daily demand
+        lead_time_days: Lead time in days
+        method: Calculation method
+    
+    Returns:
+        List of warnings (not errors - these are advisory)
+    """
+    warnings = []
+    
+    # Basic check: ROP should typically be >= SS
+    if reorder_point < safety_stock_qty:
+        warnings.append(f"Reorder point ({reorder_point:.0f}) is less than safety stock ({safety_stock_qty:.0f})")
+    
+    # For calculated methods, check expected formula
+    if method in ['DAYS_OF_SUPPLY', 'LEAD_TIME_BASED'] and avg_daily_demand > 0:
+        expected_rop = (lead_time_days * avg_daily_demand) + safety_stock_qty
+        
+        # Allow 10% tolerance
+        tolerance = expected_rop * 0.1
+        if abs(reorder_point - expected_rop) > tolerance:
+            warnings.append(f"Reorder point differs from calculated value (expected: {expected_rop:.0f}, actual: {reorder_point:.0f})")
+    
+    # Check for extreme values
+    if reorder_point > safety_stock_qty * 5:
+        warnings.append("Reorder point is unusually high compared to safety stock")
+    
+    return warnings
 
 
 def get_validation_summary(errors: List[str]) -> str:

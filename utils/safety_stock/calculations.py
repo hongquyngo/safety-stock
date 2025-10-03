@@ -3,6 +3,7 @@
 Safety Stock Calculation Methods
 3 methods only: FIXED, DAYS_OF_SUPPLY, LEAD_TIME_BASED
 Clean and simplified implementation
+Updated to integrate with demand_analysis module
 """
 
 import math
@@ -12,6 +13,7 @@ from typing import Dict, Optional
 from datetime import datetime, timedelta
 from sqlalchemy import text
 from ..db import get_db_engine
+from .demand_analysis import fetch_demand_stats, get_lead_time_estimate
 import logging
 
 logger = logging.getLogger(__name__)
@@ -42,7 +44,7 @@ def calculate_safety_stock(method: str, **params) -> Dict:
         **params: Method-specific parameters
     
     Returns:
-        Dict with calculation results including safety_stock_qty and formula
+        Dict with calculation results including safety_stock_qty, reorder_point, and formula
     """
     method_map = {
         'FIXED': calculate_fixed,
@@ -54,28 +56,45 @@ def calculate_safety_stock(method: str, **params) -> Dict:
         return {
             'method': method,
             'safety_stock_qty': 0,
+            'reorder_point': 0,
             'error': f'Unknown calculation method: {method}. Use FIXED, DAYS_OF_SUPPLY, or LEAD_TIME_BASED'
         }
     
     try:
         result = method_map[method](**params)
         result['calculated_at'] = datetime.now().isoformat()
+        
+        # Calculate reorder point for all methods
+        if 'reorder_point' not in result or result.get('reorder_point') is None:
+            result['reorder_point'] = calculate_reorder_point(
+                method=method,
+                safety_stock_qty=result['safety_stock_qty'],
+                avg_daily_demand=params.get('avg_daily_demand', 0),
+                lead_time_days=params.get('lead_time_days', 7)
+            )
+        
         return result
     except Exception as e:
         logger.error(f"Error in {method} calculation: {e}")
         return {
             'method': method,
             'safety_stock_qty': 0,
+            'reorder_point': 0,
             'error': str(e)
         }
 
 
-def calculate_fixed(safety_stock_qty: float, **kwargs) -> Dict:
+def calculate_fixed(
+    safety_stock_qty: float, 
+    reorder_point: Optional[float] = None,
+    **kwargs
+) -> Dict:
     """
     FIXED method - Manual input, no calculation
     
     Args:
         safety_stock_qty: Manually specified quantity
+        reorder_point: Manually specified reorder point
     
     Returns:
         Calculation result dictionary
@@ -83,54 +102,77 @@ def calculate_fixed(safety_stock_qty: float, **kwargs) -> Dict:
     return {
         'method': 'FIXED',
         'safety_stock_qty': float(safety_stock_qty),
+        'reorder_point': float(reorder_point) if reorder_point else None,
         'formula_used': 'Manual Input',
-        'calculation_notes': 'Safety stock quantity was manually specified'
+        'calculation_notes': 'Safety stock and reorder point were manually specified'
     }
 
 
 def calculate_days_of_supply(
     safety_days: int,
     avg_daily_demand: float = 0,
+    lead_time_days: int = 7,
     product_id: int = None,
     entity_id: int = None,
     customer_id: Optional[int] = None,
+    use_delivery_view: bool = False,
     **kwargs
 ) -> Dict:
     """
     DAYS_OF_SUPPLY method
-    Formula: safety_stock = safety_days × average_daily_demand
+    Formula: 
+    - safety_stock = safety_days × average_daily_demand
+    - reorder_point = (lead_time_days × avg_daily_demand) + safety_stock
     
     Args:
         safety_days: Number of days to cover
         avg_daily_demand: Average daily demand (optional, will calculate if not provided)
+        lead_time_days: Lead time for reorder point calculation
         product_id: Product ID for demand calculation
         entity_id: Entity ID for demand calculation
         customer_id: Customer ID for demand calculation
+        use_delivery_view: Use delivery_full_view instead of stock_out tables
     
     Returns:
         Calculation result dictionary
     """
-    # If demand not provided, calculate from history
+    # If demand not provided, fetch from appropriate source
     if avg_daily_demand == 0 and product_id and entity_id:
-        demand_stats = get_historical_demand(
-            product_id, 
-            entity_id,
-            customer_id,
-            days_back=kwargs.get('historical_days', 90)
-        )
-        avg_daily_demand = demand_stats['avg_daily_demand']
+        if use_delivery_view:
+            # Use new delivery_full_view approach
+            stats = fetch_demand_stats(
+                product_id=product_id,
+                entity_id=entity_id,
+                customer_id=customer_id,
+                days_back=kwargs.get('historical_days', 90)
+            )
+            avg_daily_demand = stats['avg_daily_demand']
+        else:
+            # Use existing stock_out tables approach
+            demand_stats = get_historical_demand(
+                product_id, 
+                entity_id,
+                customer_id,
+                days_back=kwargs.get('historical_days', 90)
+            )
+            avg_daily_demand = demand_stats['avg_daily_demand']
     
     # Calculate safety stock
     safety_stock_qty = safety_days * avg_daily_demand
     
+    # Calculate reorder point
+    reorder_point = (lead_time_days * avg_daily_demand) + safety_stock_qty
+    
     return {
         'method': 'DAYS_OF_SUPPLY',
         'safety_stock_qty': round(safety_stock_qty, 2),
-        'formula_used': f'SS = {safety_days} days × {avg_daily_demand:.2f} units/day',
-        'calculation_notes': f'Maintains {safety_days} days of average demand as buffer',
+        'reorder_point': round(reorder_point, 2),
+        'formula_used': f'SS = {safety_days} days × {avg_daily_demand:.2f} units/day | ROP = ({lead_time_days} × {avg_daily_demand:.2f}) + {safety_stock_qty:.2f}',
+        'calculation_notes': f'Maintains {safety_days} days of average demand as buffer, reorder at {reorder_point:.0f} units',
         'parameters': {
             'safety_days': safety_days,
-            'avg_daily_demand': round(avg_daily_demand, 2)
+            'avg_daily_demand': round(avg_daily_demand, 2),
+            'lead_time_days': lead_time_days
         }
     }
 
@@ -143,34 +185,50 @@ def calculate_lead_time_based(
     product_id: int = None,
     entity_id: int = None,
     customer_id: Optional[int] = None,
+    use_delivery_view: bool = False,
     **kwargs
 ) -> Dict:
     """
     LEAD_TIME_BASED method - Statistical safety stock
-    Formula: SS = Z-score × √lead_time × demand_std_deviation
+    Formula: 
+    - SS = Z-score × √lead_time × demand_std_deviation
+    - ROP = (lead_time × avg_daily_demand) + SS
     
     Args:
         lead_time_days: Lead time in days
         service_level_percent: Target service level (90-99.9)
         demand_std_deviation: Standard deviation of demand
-        avg_daily_demand: Average daily demand (for reference)
+        avg_daily_demand: Average daily demand
         product_id: Product ID for demand calculation
         entity_id: Entity ID for demand calculation
         customer_id: Customer ID for demand calculation
+        use_delivery_view: Use delivery_full_view instead of stock_out tables
     
     Returns:
         Calculation result dictionary
     """
     # Get demand statistics if not provided
     if (demand_std_deviation is None or avg_daily_demand is None) and product_id and entity_id:
-        demand_stats = get_historical_demand(
-            product_id,
-            entity_id,
-            customer_id,
-            days_back=kwargs.get('historical_days', 90)
-        )
-        demand_std_deviation = demand_std_deviation or demand_stats['std_deviation']
-        avg_daily_demand = avg_daily_demand or demand_stats['avg_daily_demand']
+        if use_delivery_view:
+            # Use new delivery_full_view approach
+            stats = fetch_demand_stats(
+                product_id=product_id,
+                entity_id=entity_id,
+                customer_id=customer_id,
+                days_back=kwargs.get('historical_days', 90)
+            )
+            demand_std_deviation = demand_std_deviation or stats['demand_std_dev']
+            avg_daily_demand = avg_daily_demand or stats['avg_daily_demand']
+        else:
+            # Use existing stock_out tables approach
+            demand_stats = get_historical_demand(
+                product_id,
+                entity_id,
+                customer_id,
+                days_back=kwargs.get('historical_days', 90)
+            )
+            demand_std_deviation = demand_std_deviation or demand_stats['std_deviation']
+            avg_daily_demand = avg_daily_demand or demand_stats['avg_daily_demand']
     
     # Default values if still missing
     demand_std_deviation = demand_std_deviation or 0
@@ -182,11 +240,15 @@ def calculate_lead_time_based(
     # Calculate safety stock: Z × √LT × σ_demand
     safety_stock_qty = z_score * math.sqrt(lead_time_days) * demand_std_deviation
     
-    formula = f'SS = {z_score:.2f} × √{lead_time_days} × {demand_std_deviation:.2f}'
+    # Calculate reorder point: (LT × ADU) + SS
+    reorder_point = (lead_time_days * avg_daily_demand) + safety_stock_qty
+    
+    formula = f'SS = {z_score:.2f} × √{lead_time_days} × {demand_std_deviation:.2f} | ROP = ({lead_time_days} × {avg_daily_demand:.2f}) + {safety_stock_qty:.2f}'
     
     return {
         'method': 'LEAD_TIME_BASED',
         'safety_stock_qty': round(safety_stock_qty, 2),
+        'reorder_point': round(reorder_point, 2),
         'formula_used': formula,
         'calculation_notes': f'Statistical SS for {service_level_percent}% service level over {lead_time_days} days lead time',
         'parameters': {
@@ -197,6 +259,38 @@ def calculate_lead_time_based(
             'avg_daily_demand': round(avg_daily_demand, 2) if avg_daily_demand else 0
         }
     }
+
+
+def calculate_reorder_point(
+    method: str,
+    safety_stock_qty: float,
+    avg_daily_demand: float = 0,
+    lead_time_days: int = 7
+) -> float:
+    """
+    Calculate reorder point for any method
+    Formula: ROP = (Lead Time × Average Daily Demand) + Safety Stock
+    
+    Args:
+        method: Calculation method
+        safety_stock_qty: Calculated or manual safety stock
+        avg_daily_demand: Average daily demand
+        lead_time_days: Lead time in days
+    
+    Returns:
+        Reorder point value
+    """
+    if method == 'FIXED':
+        # For FIXED method, ROP might be manually set
+        # If not provided, use standard formula
+        if avg_daily_demand > 0:
+            return round((lead_time_days * avg_daily_demand) + safety_stock_qty, 2)
+        else:
+            # If no demand data, ROP = 2 × Safety Stock as a simple rule
+            return round(safety_stock_qty * 2, 2)
+    else:
+        # For calculated methods, use standard formula
+        return round((lead_time_days * avg_daily_demand) + safety_stock_qty, 2)
 
 
 def get_z_score(service_level_percent: float) -> float:
@@ -228,6 +322,7 @@ def get_historical_demand(
 ) -> Dict:
     """
     Analyze historical demand for a product
+    (Keeping existing logic for backward compatibility)
     
     Args:
         product_id: Product ID
@@ -251,7 +346,7 @@ def get_historical_demand(
     try:
         engine = get_db_engine()
         
-        # Query historical demand
+        # Query historical demand from stock_out tables (existing logic)
         query = text("""
         SELECT 
             DATE(sod.created_date) as date,
@@ -398,7 +493,8 @@ def get_calculation_summary(method: str, params: Dict) -> str:
     elif method == 'DAYS_OF_SUPPLY':
         days = params.get('safety_days', 0)
         demand = params.get('avg_daily_demand', 0)
-        return f"Buffer for {days} days at {demand:.2f} units/day average demand"
+        lead_time = params.get('lead_time_days', 7)
+        return f"Buffer for {days} days at {demand:.2f} units/day average demand, reorder when stock reaches {(lead_time * demand + days * demand):.0f} units"
     
     elif method == 'LEAD_TIME_BASED':
         lt = params.get('lead_time_days', 0)

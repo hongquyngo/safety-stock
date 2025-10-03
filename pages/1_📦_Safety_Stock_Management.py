@@ -1,7 +1,7 @@
 # pages/1_📦_Safety_Stock_Management.py
 """
 Safety Stock Management Main Page
-Version 2.2 - Updated to remove reorder_qty field
+Version 3.0 - Merged Calculation & Stock Levels tabs with auto-fetch
 """
 
 import streamlit as st
@@ -9,6 +9,7 @@ import pandas as pd
 from datetime import datetime, date, timedelta
 import logging
 from typing import Dict, Optional
+import json
 
 # Import utilities
 from utils.auth import AuthManager
@@ -23,7 +24,16 @@ from utils.safety_stock.crud import (
     get_review_history,
     bulk_create_safety_stock
 )
-from utils.safety_stock.calculations import calculate_safety_stock, Z_SCORE_MAP
+from utils.safety_stock.calculations import (
+    calculate_safety_stock, 
+    Z_SCORE_MAP,
+    recommend_method
+)
+from utils.safety_stock.demand_analysis import (
+    fetch_demand_stats,
+    get_lead_time_estimate,
+    format_demand_summary
+)
 from utils.safety_stock.validations import (
     validate_safety_stock_data,
     validate_bulk_data,
@@ -75,6 +85,10 @@ if 'ss_filters' not in st.session_state:
         'product_search': '',
         'status': 'active'
     }
+
+# Temporary storage for auto-fetched values
+if 'temp_demand_data' not in st.session_state:
+    st.session_state.temp_demand_data = {}
 
 # ==================== Data Loading Functions ====================
 
@@ -351,7 +365,7 @@ def safe_float(value, default=0.0):
 
 @st.dialog("Safety Stock Configuration", width="large")
 def safety_stock_form(mode='add', record_id=None):
-    """Add/Edit safety stock dialog with permission check"""
+    """Add/Edit safety stock dialog with merged calculation and stock levels"""
     
     # Check permission
     required_permission = 'create' if mode == 'add' else 'edit'
@@ -373,8 +387,8 @@ def safety_stock_form(mode='add', record_id=None):
     
     st.markdown(f"### {'Edit' if mode == 'edit' else 'Add New'} Safety Stock")
     
-    # Tabs
-    tab1, tab2, tab3 = st.tabs(["Basic Information", "Stock Levels", "Calculation Method"])
+    # Tabs - Merged version
+    tab1, tab2 = st.tabs(["Basic Information", "Stock Levels & Calculation"])
     
     with tab1:
         col1, col2 = st.columns(2)
@@ -472,112 +486,265 @@ def safety_stock_form(mode='add', record_id=None):
         )
     
     with tab2:
-        col1, col2 = st.columns(2)
+        # MERGED CALCULATION & STOCK LEVELS
+        st.markdown("#### Calculation Method")
         
-        with col1:
-            default_ss_qty = safe_float(existing_data.get('safety_stock_qty', 0))
-            if 'calculated_safety_stock' in st.session_state:
-                default_ss_qty = st.session_state.calculated_safety_stock
-            
-            safety_stock_qty = st.number_input(
-                "Safety Stock Quantity *",
-                min_value=0.0,
-                value=default_ss_qty,
-                step=1.0,
-                help="The buffer quantity to maintain above zero"
-            )
-            
-            if 'calculated_safety_stock' in st.session_state:
-                st.success(f"✔ Calculated: {st.session_state.calculated_safety_stock:.2f}")
-                if st.button("Clear Calculated Value"):
-                    del st.session_state.calculated_safety_stock
-                    st.rerun()
-        
-        with col2:
-            reorder_point = st.number_input(
-                "Reorder Point",
-                min_value=0.0,
-                value=safe_float(existing_data.get('reorder_point')),
-                step=1.0,
-                help="Trigger new purchase order at this level"
-            )
-    
-    with tab3:
         methods = ['FIXED', 'DAYS_OF_SUPPLY', 'LEAD_TIME_BASED']
-        
         current_method = existing_data.get('calculation_method', 'FIXED')
         method_idx = methods.index(current_method) if current_method in methods else 0
         
         calculation_method = st.selectbox(
-            "Calculation Method",
+            "Select Calculation Method",
             options=methods,
             index=method_idx,
-            help="FIXED: Manual | DAYS_OF_SUPPLY: Days × Demand | LEAD_TIME_BASED: Statistical with service level"
+            help="FIXED: Manual input | DAYS_OF_SUPPLY: Days × Demand | LEAD_TIME_BASED: Statistical with service level"
         )
         
-        calc_params = {}
+        # Auto-fetch section (for non-FIXED methods)
+        if calculation_method != 'FIXED':
+            with st.expander("📊 Auto-Fetch Historical Demand", expanded=False):
+                col1, col2, col3 = st.columns([2, 2, 1])
+                with col1:
+                    fetch_days = st.number_input(
+                        "Analyze last N days",
+                        min_value=30,
+                        max_value=365,
+                        value=90,
+                        step=30
+                    )
+                with col2:
+                    exclude_pending = st.checkbox("Exclude pending deliveries", value=True)
+                with col3:
+                    if st.button("Fetch Data", type="primary", use_container_width=True):
+                        with st.spinner("Fetching from delivery_full_view..."):
+                            stats = fetch_demand_stats(
+                                product_id=product_id,
+                                entity_id=entity_id,
+                                customer_id=customer_id,
+                                days_back=fetch_days,
+                                exclude_pending=exclude_pending
+                            )
+                            
+                            # Store in temp session state
+                            st.session_state.temp_demand_data = stats
+                            
+                            # Show summary
+                            if stats['data_points'] > 0:
+                                st.success(f"✓ Found {stats['data_points']} delivery dates")
+                                st.info(format_demand_summary(stats))
+                                
+                                # Also try to get lead time estimate
+                                lead_time_info = get_lead_time_estimate(
+                                    product_id=product_id,
+                                    entity_id=entity_id,
+                                    customer_id=customer_id
+                                )
+                                if lead_time_info['sample_size'] > 0:
+                                    st.session_state.temp_demand_data['lead_time_days'] = lead_time_info['avg_lead_time_days']
+                                    st.info(f"📦 Estimated lead time: {lead_time_info['avg_lead_time_days']:.0f} days (from {lead_time_info['sample_size']} deliveries)")
+                            else:
+                                st.warning("No historical data found for this product/entity combination")
         
-        if calculation_method == 'DAYS_OF_SUPPLY':
+        # Get temp data if available
+        temp_data = st.session_state.get('temp_demand_data', {})
+        
+        # Dynamic input fields based on method
+        st.markdown("#### Parameters")
+        
+        if calculation_method == 'FIXED':
+            # Manual input for everything
             col1, col2 = st.columns(2)
             with col1:
-                safety_days_value = existing_data.get('safety_days')
+                safety_stock_qty = st.number_input(
+                    "Safety Stock Quantity *",
+                    min_value=0.0,
+                    value=safe_float(existing_data.get('safety_stock_qty', 0)),
+                    step=1.0,
+                    help="Manually set safety stock buffer"
+                )
+            with col2:
+                reorder_point = st.number_input(
+                    "Reorder Point",
+                    min_value=0.0,
+                    value=safe_float(existing_data.get('reorder_point', 0)),
+                    step=1.0,
+                    help="Inventory level that triggers reorder"
+                )
+            
+            calc_params = {'calculation_method': 'FIXED'}
+            
+        elif calculation_method == 'DAYS_OF_SUPPLY':
+            col1, col2 = st.columns(2)
+            with col1:
+                safety_days_value = existing_data.get('safety_days', 14)
                 if safety_days_value is None or safety_days_value == 0:
                     safety_days_value = 14
                 
-                calc_params['safety_days'] = st.number_input(
-                    "Safety Days",
+                safety_days = st.number_input(
+                    "Safety Days *",
                     min_value=1,
-                    value=safe_int(safety_days_value, default=14)
+                    value=safe_int(safety_days_value, default=14),
+                    help="Number of days of demand to maintain as buffer"
                 )
-            with col2:
-                calc_params['avg_daily_demand'] = st.number_input(
+                
+                # Use temp data if available, otherwise existing or 0
+                default_demand = temp_data.get('avg_daily_demand', 
+                                              existing_data.get('avg_daily_demand', 0))
+                avg_daily_demand = st.number_input(
                     "Avg Daily Demand",
                     min_value=0.0,
-                    value=safe_float(existing_data.get('avg_daily_demand', 0))
+                    value=safe_float(default_demand, 0),
+                    step=0.1,
+                    help="Units per day (editable)"
                 )
-        
+            
+            with col2:
+                # Lead time for reorder point calculation
+                default_lead_time = temp_data.get('lead_time_days',
+                                                 existing_data.get('lead_time_days', 7))
+                lead_time_days = st.number_input(
+                    "Lead Time (days)",
+                    min_value=1,
+                    value=safe_int(default_lead_time, 7),
+                    help="Days from order to delivery"
+                )
+            
+            # Calculate button
+            if st.button("Calculate Safety Stock & Reorder Point", type="primary"):
+                result = calculate_safety_stock(
+                    method='DAYS_OF_SUPPLY',
+                    safety_days=safety_days,
+                    avg_daily_demand=avg_daily_demand,
+                    lead_time_days=lead_time_days
+                )
+                
+                if 'error' not in result:
+                    st.session_state.calculated_ss = result['safety_stock_qty']
+                    st.session_state.calculated_rop = result['reorder_point']
+                    st.success(f"✓ Safety Stock: {result['safety_stock_qty']:.2f} units")
+                    st.success(f"✓ Reorder Point: {result['reorder_point']:.2f} units")
+                    st.info(f"Formula: {result['formula_used']}")
+                else:
+                    st.error(result['error'])
+            
+            # Use calculated or manual values
+            safety_stock_qty = st.number_input(
+                "Safety Stock Quantity",
+                min_value=0.0,
+                value=safe_float(st.session_state.get('calculated_ss', 
+                                existing_data.get('safety_stock_qty', 0))),
+                step=1.0,
+                help="Calculated value (editable)"
+            )
+            
+            reorder_point = st.number_input(
+                "Reorder Point",
+                min_value=0.0,
+                value=safe_float(st.session_state.get('calculated_rop',
+                                existing_data.get('reorder_point', 0))),
+                step=1.0,
+                help="Calculated value (editable)"
+            )
+            
+            calc_params = {
+                'calculation_method': 'DAYS_OF_SUPPLY',
+                'safety_days': safety_days,
+                'avg_daily_demand': avg_daily_demand,
+                'lead_time_days': lead_time_days
+            }
+            
         elif calculation_method == 'LEAD_TIME_BASED':
             col1, col2 = st.columns(2)
             with col1:
-                lead_time_value = existing_data.get('lead_time_days')
+                lead_time_value = temp_data.get('lead_time_days',
+                                               existing_data.get('lead_time_days', 7))
                 if lead_time_value is None or lead_time_value == 0:
                     lead_time_value = 7
                 
-                calc_params['lead_time_days'] = st.number_input(
-                    "Lead Time (days)",
+                lead_time_days = st.number_input(
+                    "Lead Time (days) *",
                     min_value=1,
-                    value=safe_int(lead_time_value, default=7)
+                    value=safe_int(lead_time_value, default=7),
+                    help="Days from order to delivery"
                 )
-                calc_params['service_level_percent'] = st.selectbox(
-                    "Service Level %",
-                    options=list(Z_SCORE_MAP.keys()),
-                    index=4
-                )
-            with col2:
-                calc_params['demand_std_deviation'] = st.number_input(
-                    "Demand Std Dev",
-                    min_value=0.0,
-                    value=safe_float(existing_data.get('demand_std_deviation', 0))
-                )
-        
-        if calculation_method != 'FIXED':
-            if st.button("Calculate", type="primary"):
-                params = {
-                    'product_id': product_id,
-                    'entity_id': entity_id,
-                    'customer_id': customer_id,
-                    **calc_params
-                }
                 
-                result = calculate_safety_stock(calculation_method, **params)
+                service_level_options = list(Z_SCORE_MAP.keys())
+                current_sl = existing_data.get('service_level_percent', 95.0)
+                sl_idx = service_level_options.index(current_sl) if current_sl in service_level_options else 4
+                
+                service_level_percent = st.selectbox(
+                    "Service Level % *",
+                    options=service_level_options,
+                    index=sl_idx,
+                    help="Target probability of no stockout"
+                )
+            
+            with col2:
+                default_std = temp_data.get('demand_std_dev',
+                                           existing_data.get('demand_std_deviation', 0))
+                demand_std_deviation = st.number_input(
+                    "Demand Std Deviation",
+                    min_value=0.0,
+                    value=safe_float(default_std, 0),
+                    step=0.1,
+                    help="Standard deviation of daily demand"
+                )
+                
+                default_demand = temp_data.get('avg_daily_demand',
+                                              existing_data.get('avg_daily_demand', 0))
+                avg_daily_demand = st.number_input(
+                    "Avg Daily Demand",
+                    min_value=0.0,
+                    value=safe_float(default_demand, 0),
+                    step=0.1,
+                    help="Units per day"
+                )
+            
+            # Calculate button
+            if st.button("Calculate Safety Stock & Reorder Point", type="primary"):
+                result = calculate_safety_stock(
+                    method='LEAD_TIME_BASED',
+                    lead_time_days=lead_time_days,
+                    service_level_percent=service_level_percent,
+                    demand_std_deviation=demand_std_deviation,
+                    avg_daily_demand=avg_daily_demand
+                )
                 
                 if 'error' not in result:
-                    st.session_state.calculated_safety_stock = result['safety_stock_qty']
-                    st.success(f"Result: {result['safety_stock_qty']:.2f}")
-                    st.info(result['formula_used'])
-                    st.rerun()
+                    st.session_state.calculated_ss = result['safety_stock_qty']
+                    st.session_state.calculated_rop = result['reorder_point']
+                    st.success(f"✓ Safety Stock: {result['safety_stock_qty']:.2f} units")
+                    st.success(f"✓ Reorder Point: {result['reorder_point']:.2f} units")
+                    st.info(f"Formula: {result['formula_used']}")
                 else:
                     st.error(result['error'])
+            
+            # Use calculated or manual values
+            safety_stock_qty = st.number_input(
+                "Safety Stock Quantity",
+                min_value=0.0,
+                value=safe_float(st.session_state.get('calculated_ss',
+                                existing_data.get('safety_stock_qty', 0))),
+                step=1.0,
+                help="Calculated value (editable)"
+            )
+            
+            reorder_point = st.number_input(
+                "Reorder Point",
+                min_value=0.0,
+                value=safe_float(st.session_state.get('calculated_rop',
+                                existing_data.get('reorder_point', 0))),
+                step=1.0,
+                help="Calculated value (editable)"
+            )
+            
+            calc_params = {
+                'calculation_method': 'LEAD_TIME_BASED',
+                'lead_time_days': lead_time_days,
+                'service_level_percent': service_level_percent,
+                'demand_std_deviation': demand_std_deviation,
+                'avg_daily_demand': avg_daily_demand
+            }
     
     # Buttons
     st.divider()
@@ -595,7 +762,6 @@ def safety_stock_form(mode='add', record_id=None):
                 'effective_to': effective_to,
                 'priority_level': priority_level,
                 'business_notes': business_notes if business_notes else None,
-                'calculation_method': calculation_method,
                 'is_active': 1,
                 **calc_params
             }
@@ -615,8 +781,13 @@ def safety_stock_form(mode='add', record_id=None):
                     log_action('UPDATE', f"Updated safety stock ID {record_id}")
                 
                 if success:
-                    if 'calculated_safety_stock' in st.session_state:
-                        del st.session_state.calculated_safety_stock
+                    # Clear temp data
+                    if 'calculated_ss' in st.session_state:
+                        del st.session_state.calculated_ss
+                    if 'calculated_rop' in st.session_state:
+                        del st.session_state.calculated_rop
+                    if 'temp_demand_data' in st.session_state:
+                        del st.session_state.temp_demand_data
                     st.success(f"{'Created' if mode == 'add' else 'Updated'} successfully!")
                     st.cache_data.clear()
                     st.rerun()
@@ -627,8 +798,13 @@ def safety_stock_form(mode='add', record_id=None):
     
     with col2:
         if st.button("Cancel", use_container_width=True):
-            if 'calculated_safety_stock' in st.session_state:
-                del st.session_state.calculated_safety_stock
+            # Clear temp data
+            if 'calculated_ss' in st.session_state:
+                del st.session_state.calculated_ss
+            if 'calculated_rop' in st.session_state:
+                del st.session_state.calculated_rop
+            if 'temp_demand_data' in st.session_state:
+                del st.session_state.temp_demand_data
             st.rerun()
     
     with col3:
@@ -1088,7 +1264,7 @@ def main():
     if df.empty:
         st.info("No records found")
     else:
-        # Display columns - removed reorder_qty
+        # Display columns
         display_cols = [
             'pt_code', 'product_name', 'entity_code', 'customer_code',
             'safety_stock_qty', 'reorder_point',

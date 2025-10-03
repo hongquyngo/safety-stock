@@ -241,7 +241,7 @@ def get_lead_time_estimate(
 
 def format_demand_summary(stats: Dict) -> str:
     """
-    Format demand statistics for display
+    Format demand statistics for display (simplified version)
     
     Args:
         stats: Dictionary with demand statistics
@@ -252,23 +252,8 @@ def format_demand_summary(stats: Dict) -> str:
     if stats['data_points'] == 0:
         return "No historical data found for the selected period"
     
-    summary = f"""
-📊 **Demand Analysis Summary**
-- Period: Last {stats['days_analyzed']} days
-- Data Points: {stats['data_points']} delivery dates
-- Avg Daily Demand: {stats['avg_daily_demand']:.2f} units/day
-- Std Deviation: {stats['demand_std_dev']:.2f} units
-- Variability (CV%): {stats['cv_percent']:.1f}%
-- Suggested Method: {stats['suggested_method']}
-    """.strip()
-    
-    # Add variability interpretation
-    if stats['cv_percent'] < 20:
-        summary += "\n- Pattern: Low variability (stable demand)"
-    elif stats['cv_percent'] < 50:
-        summary += "\n- Pattern: Moderate variability"
-    else:
-        summary += "\n- Pattern: High variability (unpredictable)"
+    # Simplified summary - không cần hiển thị chi tiết vì đã có metrics
+    summary = f"Analysis complete: {stats['data_points']} data points analyzed"
     
     return summary
 

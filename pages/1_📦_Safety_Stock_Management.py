@@ -1,7 +1,7 @@
 # pages/1_📦_Safety_Stock_Management.py
 """
 Safety Stock Management Main Page
-Version 2.1 - With Role-Based Access Control
+Version 2.2 - Updated to remove reorder_qty field
 """
 
 import streamlit as st
@@ -488,7 +488,7 @@ def safety_stock_form(mode='add', record_id=None):
             )
             
             if 'calculated_safety_stock' in st.session_state:
-                st.success(f"✓ Calculated: {st.session_state.calculated_safety_stock:.2f}")
+                st.success(f"✔ Calculated: {st.session_state.calculated_safety_stock:.2f}")
                 if st.button("Clear Calculated Value"):
                     del st.session_state.calculated_safety_stock
                     st.rerun()
@@ -500,14 +500,6 @@ def safety_stock_form(mode='add', record_id=None):
                 value=safe_float(existing_data.get('reorder_point')),
                 step=1.0,
                 help="Trigger new purchase order at this level"
-            )
-            
-            reorder_qty = st.number_input(
-                "Reorder Quantity",
-                min_value=0.0,
-                value=safe_float(existing_data.get('reorder_qty')),
-                step=1.0,
-                help="Suggested order quantity (can be EOQ)"
             )
     
     with tab3:
@@ -599,7 +591,6 @@ def safety_stock_form(mode='add', record_id=None):
                 'customer_id': customer_id,
                 'safety_stock_qty': safety_stock_qty,
                 'reorder_point': reorder_point if reorder_point > 0 else None,
-                'reorder_qty': reorder_qty if reorder_qty > 0 else None,
                 'effective_from': effective_from,
                 'effective_to': effective_to,
                 'priority_level': priority_level,
@@ -683,7 +674,6 @@ def review_dialog(safety_stock_id):
             st.write(f"**Effective From:** {current_data.get('effective_from')}")
             st.write(f"**Priority:** {current_data.get('priority_level')}")
         with info_col2:
-            st.write(f"**Reorder Qty:** {safe_float(current_data.get('reorder_qty', 0)):.0f}")
             st.write(f"**Effective To:** {current_data.get('effective_to') or 'Ongoing'}")
             customer = current_data.get('customer_name') or 'General Rule'
             st.write(f"**Customer:** {customer}")
@@ -805,7 +795,7 @@ def review_dialog(safety_stock_id):
                 st.cache_data.clear()
                 st.rerun()
             else:
-                st.error(f"⌛ Error: {message}")
+                st.error(f"⚠️ Error: {message}")
     
     with col2:
         if st.button("Cancel", use_container_width=True):
@@ -1098,10 +1088,10 @@ def main():
     if df.empty:
         st.info("No records found")
     else:
-        # Display columns
+        # Display columns - removed reorder_qty
         display_cols = [
             'pt_code', 'product_name', 'entity_code', 'customer_code',
-            'safety_stock_qty', 'reorder_point', 'reorder_qty',
+            'safety_stock_qty', 'reorder_point',
             'calculation_method', 'rule_type', 
             'status', 'effective_from', 'priority_level'
         ]

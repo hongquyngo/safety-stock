@@ -1,7 +1,7 @@
 # utils/safety_stock/crud.py
 """
 CRUD operations for Safety Stock Management
-Version 2.1 - With role-based access control
+Version 2.2 - Updated to remove reorder_qty field
 """
 
 import pandas as pd
@@ -99,7 +99,6 @@ def get_safety_stock_levels(
             
             s.safety_stock_qty,
             s.reorder_point,
-            s.reorder_qty,
             
             ssp.calculation_method,
             ssp.lead_time_days,
@@ -237,17 +236,17 @@ def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
         engine = get_db_engine()
         
         with engine.begin() as conn:
-            # Insert main record
+            # Insert main record - removed reorder_qty
             insert_query = text("""
             INSERT INTO safety_stock_levels (
                 product_id, entity_id, customer_id,
-                safety_stock_qty, reorder_point, reorder_qty,
+                safety_stock_qty, reorder_point,
                 effective_from, effective_to, is_active,
                 priority_level, business_notes,
                 created_by, updated_by
             ) VALUES (
                 :product_id, :entity_id, :customer_id,
-                :safety_stock_qty, :reorder_point, :reorder_qty,
+                :safety_stock_qty, :reorder_point,
                 :effective_from, :effective_to, :is_active,
                 :priority_level, :business_notes,
                 :created_by, :updated_by
@@ -260,7 +259,6 @@ def create_safety_stock(data: Dict, created_by: str) -> Tuple[bool, str]:
                 'customer_id': data.get('customer_id'),
                 'safety_stock_qty': data['safety_stock_qty'],
                 'reorder_point': data.get('reorder_point'),
-                'reorder_qty': data.get('reorder_qty'),
                 'effective_from': data['effective_from'],
                 'effective_to': data.get('effective_to'),
                 'is_active': data.get('is_active', 1),
@@ -342,9 +340,9 @@ def update_safety_stock(
         update_fields = []
         params = {'id': safety_stock_id, 'updated_by': updated_by}
         
-        # Updatable fields
+        # Updatable fields - removed reorder_qty
         updatable_fields = [
-            'safety_stock_qty', 'reorder_point', 'reorder_qty',
+            'safety_stock_qty', 'reorder_point',
             'effective_from', 'effective_to', 'is_active', 
             'priority_level', 'business_notes'
         ]
@@ -491,14 +489,13 @@ def bulk_create_safety_stock(
         with engine.begin() as conn:
             for idx, data in enumerate(data_list, 1):
                 try:
-                    # Prepare data with defaults
+                    # Prepare data with defaults - removed reorder_qty
                     insert_data = {
                         'product_id': data['product_id'],
                         'entity_id': data['entity_id'],
                         'customer_id': data.get('customer_id'),
                         'safety_stock_qty': data['safety_stock_qty'],
                         'reorder_point': data.get('reorder_point'),
-                        'reorder_qty': data.get('reorder_qty'),
                         'effective_from': data.get('effective_from', datetime.now().date()),
                         'effective_to': data.get('effective_to'),
                         'is_active': data.get('is_active', 1),
@@ -511,13 +508,13 @@ def bulk_create_safety_stock(
                     insert_query = text("""
                     INSERT INTO safety_stock_levels (
                         product_id, entity_id, customer_id,
-                        safety_stock_qty, reorder_point, reorder_qty,
+                        safety_stock_qty, reorder_point,
                         effective_from, effective_to, is_active,
                         priority_level, business_notes,
                         created_by, updated_by
                     ) VALUES (
                         :product_id, :entity_id, :customer_id,
-                        :safety_stock_qty, :reorder_point, :reorder_qty,
+                        :safety_stock_qty, :reorder_point,
                         :effective_from, :effective_to, :is_active,
                         :priority_level, :business_notes,
                         :created_by, :updated_by

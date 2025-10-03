@@ -1,7 +1,7 @@
 # utils/safety_stock/validations.py
 """
 Validation functions for Safety Stock Management
-Simplified and clean validation logic
+Version 2.2 - Updated to remove reorder_qty field
 """
 
 import pandas as pd
@@ -52,10 +52,6 @@ def validate_safety_stock_data(
         # Reorder point should be >= safety stock
         if 'safety_stock_qty' in data and data['reorder_point'] < data['safety_stock_qty']:
             errors.append("Reorder point should not be less than safety stock quantity")
-    
-    if 'reorder_qty' in data and data['reorder_qty'] is not None:
-        if data['reorder_qty'] <= 0:
-            errors.append("Reorder quantity must be positive")
     
     # 3. Validate dates
     if 'effective_from' in data:

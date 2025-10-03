@@ -1,7 +1,7 @@
 # utils/safety_stock/export.py
 """
 Export and reporting functions for Safety Stock Management
-Clean implementation with Excel formatting
+Version 2.2 - Updated to remove reorder_qty field
 """
 
 import pandas as pd
@@ -51,12 +51,12 @@ def export_to_excel(
     
     try:
         with pd.ExcelWriter(output, engine='openpyxl') as writer:
-            # Main data columns
+            # Main data columns - removed reorder_qty
             main_columns = [
                 'pt_code', 'product_name', 'brand_name',
                 'entity_code', 'entity_name',
                 'customer_code', 'customer_name',
-                'safety_stock_qty', 'reorder_point', 'reorder_qty',
+                'safety_stock_qty', 'reorder_point',
                 'calculation_method', 'rule_type', 'status',
                 'effective_from', 'effective_to',
                 'priority_level', 'business_notes'
@@ -183,14 +183,13 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
     output = io.BytesIO()
     
     try:
-        # Template columns with descriptions
+        # Template columns with descriptions - removed reorder_qty
         template_data = {
             'product_id': ['Required: Product ID from system'],
             'entity_id': ['Required: Entity/Company ID'],
             'customer_id': ['Optional: Customer ID (leave blank for general rule)'],
             'safety_stock_qty': ['Required: Safety Stock Quantity (>= 0)'],
             'reorder_point': ['Optional: Reorder trigger point'],
-            'reorder_qty': ['Optional: Suggested reorder quantity'],
             'calculation_method': ['Optional: FIXED | DAYS_OF_SUPPLY | LEAD_TIME_BASED'],
             'lead_time_days': ['Optional: For LEAD_TIME_BASED method'],
             'safety_days': ['Optional: For DAYS_OF_SUPPLY method'],
@@ -214,7 +213,6 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
                     'customer_id': '',
                     'safety_stock_qty': 100,
                     'reorder_point': 150,
-                    'reorder_qty': 200,
                     'calculation_method': 'DAYS_OF_SUPPLY',
                     'lead_time_days': '',
                     'safety_days': 14,
@@ -232,7 +230,6 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
                     'customer_id': 5,
                     'safety_stock_qty': 75,
                     'reorder_point': 120,
-                    'reorder_qty': 150,
                     'calculation_method': 'LEAD_TIME_BASED',
                     'lead_time_days': 7,
                     'safety_days': '',
@@ -250,7 +247,6 @@ def create_upload_template(include_sample_data: bool = False) -> io.BytesIO:
                     'customer_id': '',
                     'safety_stock_qty': 200,
                     'reorder_point': 250,
-                    'reorder_qty': '',
                     'calculation_method': 'FIXED',
                     'lead_time_days': '',
                     'safety_days': '',
@@ -328,6 +324,12 @@ def _create_instructions() -> list:
         '   - Formula: SS = Z-score × √lead_time × std_deviation',
         '   - Required: lead_time_days, service_level_percent',
         '   - Service levels: 90, 95, 98, 99',
+        '',
+        '=== OPTIONAL FIELDS ===',
+        '• reorder_point: Inventory level that triggers new purchase order',
+        '• customer_id: Leave blank for general rules, or specify customer ID',
+        '• effective_to: End date for the rule (blank = ongoing)',
+        '• business_notes: Any additional context or notes',
         '',
         '=== PRIORITY RULES ===',
         '• Lower number = higher priority',

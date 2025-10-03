@@ -1,7 +1,7 @@
 # pages/1_📦_Safety_Stock_Management.py
 """
 Safety Stock Management Main Page
-Version 3.2 - Fixed dialog closing bug with proper state management
+Version 3.4 - Simple searchable selectbox for product selection
 """
 
 import streamlit as st
@@ -240,8 +240,8 @@ def load_customers():
         return pd.DataFrame()
 
 @st.cache_data(ttl=300)
-def load_products():
-    """Load products with package size and brand"""
+def load_all_products_for_select():
+    """Load all products formatted for selectbox"""
     try:
         engine = get_db_engine()
         query = text("""
@@ -258,13 +258,27 @@ def load_products():
         AND p.pt_code IS NOT NULL
         ORDER BY p.pt_code
         """)
+        
         with engine.connect() as conn:
             df = pd.read_sql(query, conn)
-            df['display_text'] = df.apply(lambda row: format_product_display(row), axis=1)
-            return df
+        
+        if df.empty:
+            return [], {}
+        
+        # Create display text and mapping
+        options = []
+        id_map = {}
+        
+        for _, row in df.iterrows():
+            display = format_product_display(row)
+            options.append(display)
+            id_map[display] = row['id']
+        
+        return options, id_map
+        
     except Exception as e:
-        st.error(f"Error loading products: {e}")
-        return pd.DataFrame()
+        logger.error(f"Error loading products: {e}")
+        return [], {}
 
 def format_product_display(row):
     """Format product display"""
@@ -362,7 +376,7 @@ def fetch_and_store_demand_data(product_id, entity_id, customer_id, fetch_days, 
 
 @st.dialog("Safety Stock Configuration", width="large")
 def safety_stock_form(mode='add', record_id=None):
-    """Add/Edit safety stock dialog with fixed state management"""
+    """Add/Edit safety stock dialog with simple searchable selectbox"""
     
     # Check permission
     required_permission = 'create' if mode == 'add' else 'edit'
@@ -384,9 +398,8 @@ def safety_stock_form(mode='add', record_id=None):
     
     entities = load_entities()
     customers = load_customers()
-    products = load_products()
     
-    if entities.empty or products.empty:
+    if entities.empty:
         st.error("Unable to load required data")
         return
     
@@ -399,18 +412,35 @@ def safety_stock_form(mode='add', record_id=None):
         col1, col2 = st.columns(2)
         
         with col1:
-            # Product selection
+            # Product selection - simple searchable selectbox
             if mode == 'add':
-                display_products = products.head(200)
-                selected_product = st.selectbox(
-                    "Product * (type to search)",
-                    options=range(len(display_products)),
-                    format_func=lambda x: display_products.iloc[x]['display_text'] if x < len(display_products) else "",
-                    help="Start typing PT code, name, package size, or brand to filter"
-                )
-                product_id = display_products.iloc[selected_product]['id']
-                st.caption(f"Showing {len(display_products)} products")
+                # Load all products once
+                product_options, product_id_map = load_all_products_for_select()
+                
+                if not product_options:
+                    st.error("No products available")
+                    product_id = None
+                else:
+                    # Streamlit selectbox with built-in search
+                    selected_option = st.selectbox(
+                        "Product * (type to search)",
+                        options=product_options,
+                        index=None,  # No default selection
+                        placeholder="Type PT code or name to search...",
+                        key="product_selectbox",
+                        help=f"Total {len(product_options)} products available"
+                    )
+                    
+                    if selected_option:
+                        product_id = product_id_map.get(selected_option)
+                        # Extract PT code for display
+                        pt_code = selected_option.split(" | ")[0]
+                        st.success(f"✓ Selected: {pt_code}")
+                    else:
+                        product_id = None
+                        st.warning("Please select a product")
             else:
+                # Edit mode - show existing product
                 st.text_input(
                     "Product",
                     value=f"{existing_data.get('pt_code', '')} | {existing_data.get('product_name', '')}",
@@ -491,6 +521,11 @@ def safety_stock_form(mode='add', record_id=None):
         )
     
     with tab2:
+        # Check if product is selected
+        if mode == 'add' and not product_id:
+            st.warning("Please select a product first in the Basic Information tab")
+            st.stop()
+        
         st.markdown("#### 📊 Historical Demand Analysis")
         
         # Fetch data section
@@ -501,20 +536,18 @@ def safety_stock_form(mode='add', record_id=None):
                     "Analyze last N days",
                     min_value=30,
                     max_value=365,
-                    value=90,
+                    value=180,
                     step=30,
                     key="fetch_days_input"
                 )
             with col2:
                 exclude_pending = st.checkbox("Exclude pending deliveries", value=True, key="exclude_pending_check")
             with col3:
-                # Use regular button with callback approach
                 if st.button("Fetch Data", type="primary", use_container_width=True, key="fetch_btn"):
                     with st.spinner("Fetching from delivery_full_view..."):
                         stats, lead_time_info = fetch_and_store_demand_data(
                             product_id, entity_id, customer_id, fetch_days, exclude_pending
                         )
-                        # Set flag to show data was fetched
                         st.session_state.dialog_data['data_fetched'] = True
         
         # Display fetched data if available
@@ -522,7 +555,7 @@ def safety_stock_form(mode='add', record_id=None):
             stats = st.session_state.dialog_data['demand_stats']
             
             if stats.get('data_points', 0) > 0:
-                st.success(f"✓ Found {stats['data_points']} delivery dates")
+                st.success(f"✔ Found {stats['data_points']} delivery dates")
                 
                 # Metrics
                 metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
@@ -605,7 +638,7 @@ def safety_stock_form(mode='add', record_id=None):
                 )
                 
                 avg_daily_demand = st.number_input(
-                    "Avg Daily Demand" + (" ✓" if has_auto_data else ""),
+                    "Avg Daily Demand" + (" ✔" if has_auto_data else ""),
                     min_value=0.0,
                     value=safe_float(demand_stats.get('avg_daily_demand', 0) if has_auto_data else existing_data.get('avg_daily_demand', 0)),
                     step=0.1,
@@ -614,7 +647,7 @@ def safety_stock_form(mode='add', record_id=None):
             
             with col2:
                 lead_time_days = st.number_input(
-                    "Lead Time (days)" + (" ✓" if has_auto_data and 'lead_time_days' in st.session_state.dialog_data else ""),
+                    "Lead Time (days)" + (" ✔" if has_auto_data and 'lead_time_days' in st.session_state.dialog_data else ""),
                     min_value=1,
                     value=safe_int(st.session_state.dialog_data.get('lead_time_days', 7) if has_auto_data else existing_data.get('lead_time_days', 7)),
                     key="lt_dos"
@@ -635,9 +668,9 @@ def safety_stock_form(mode='add', record_id=None):
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.success(f"✓ Safety Stock: **{result['safety_stock_qty']:.2f}** units")
+                        st.success(f"✔ Safety Stock: **{result['safety_stock_qty']:.2f}** units")
                     with col2:
-                        st.success(f"✓ Reorder Point: **{result['reorder_point']:.2f}** units")
+                        st.success(f"✔ Reorder Point: **{result['reorder_point']:.2f}** units")
                     
                     st.caption(f"Formula: {result['formula_used']}")
                 else:
@@ -647,7 +680,7 @@ def safety_stock_form(mode='add', record_id=None):
             col1, col2 = st.columns(2)
             with col1:
                 safety_stock_qty = st.number_input(
-                    "Safety Stock Quantity" + (" ✓" if 'calculated_ss' in st.session_state.dialog_data else ""),
+                    "Safety Stock Quantity" + (" ✔" if 'calculated_ss' in st.session_state.dialog_data else ""),
                     min_value=0.0,
                     value=safe_float(st.session_state.dialog_data.get('calculated_ss', existing_data.get('safety_stock_qty', 0))),
                     step=1.0,
@@ -655,7 +688,7 @@ def safety_stock_form(mode='add', record_id=None):
                 )
             with col2:
                 reorder_point = st.number_input(
-                    "Reorder Point" + (" ✓" if 'calculated_rop' in st.session_state.dialog_data else ""),
+                    "Reorder Point" + (" ✔" if 'calculated_rop' in st.session_state.dialog_data else ""),
                     min_value=0.0,
                     value=safe_float(st.session_state.dialog_data.get('calculated_rop', existing_data.get('reorder_point', 0))),
                     step=1.0,
@@ -676,7 +709,7 @@ def safety_stock_form(mode='add', record_id=None):
             col1, col2 = st.columns(2)
             with col1:
                 lead_time_days = st.number_input(
-                    "Lead Time (days) *" + (" ✓" if has_auto_data and 'lead_time_days' in st.session_state.dialog_data else ""),
+                    "Lead Time (days) *" + (" ✔" if has_auto_data and 'lead_time_days' in st.session_state.dialog_data else ""),
                     min_value=1,
                     value=safe_int(st.session_state.dialog_data.get('lead_time_days', 7) if has_auto_data else existing_data.get('lead_time_days', 7)),
                     key="lt_ltb"
@@ -695,7 +728,7 @@ def safety_stock_form(mode='add', record_id=None):
             
             with col2:
                 demand_std_deviation = st.number_input(
-                    "Demand Std Deviation" + (" ✓" if has_auto_data else ""),
+                    "Demand Std Deviation" + (" ✔" if has_auto_data else ""),
                     min_value=0.0,
                     value=safe_float(demand_stats.get('demand_std_dev', 0) if has_auto_data else existing_data.get('demand_std_deviation', 0)),
                     step=0.1,
@@ -703,7 +736,7 @@ def safety_stock_form(mode='add', record_id=None):
                 )
                 
                 avg_daily_demand = st.number_input(
-                    "Avg Daily Demand" + (" ✓" if has_auto_data else ""),
+                    "Avg Daily Demand" + (" ✔" if has_auto_data else ""),
                     min_value=0.0,
                     value=safe_float(demand_stats.get('avg_daily_demand', 0) if has_auto_data else existing_data.get('avg_daily_demand', 0)),
                     step=0.1,
@@ -726,9 +759,9 @@ def safety_stock_form(mode='add', record_id=None):
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.success(f"✓ Safety Stock: **{result['safety_stock_qty']:.2f}** units")
+                        st.success(f"✔ Safety Stock: **{result['safety_stock_qty']:.2f}** units")
                     with col2:
-                        st.success(f"✓ Reorder Point: **{result['reorder_point']:.2f}** units")
+                        st.success(f"✔ Reorder Point: **{result['reorder_point']:.2f}** units")
                     
                     st.caption(f"Formula: {result['formula_used']}")
                 else:
@@ -738,7 +771,7 @@ def safety_stock_form(mode='add', record_id=None):
             col1, col2 = st.columns(2)
             with col1:
                 safety_stock_qty = st.number_input(
-                    "Safety Stock Quantity" + (" ✓" if 'calculated_ss' in st.session_state.dialog_data else ""),
+                    "Safety Stock Quantity" + (" ✔" if 'calculated_ss' in st.session_state.dialog_data else ""),
                     min_value=0.0,
                     value=safe_float(st.session_state.dialog_data.get('calculated_ss', existing_data.get('safety_stock_qty', 0))),
                     step=1.0,
@@ -746,7 +779,7 @@ def safety_stock_form(mode='add', record_id=None):
                 )
             with col2:
                 reorder_point = st.number_input(
-                    "Reorder Point" + (" ✓" if 'calculated_rop' in st.session_state.dialog_data else ""),
+                    "Reorder Point" + (" ✔" if 'calculated_rop' in st.session_state.dialog_data else ""),
                     min_value=0.0,
                     value=safe_float(st.session_state.dialog_data.get('calculated_rop', existing_data.get('reorder_point', 0))),
                     step=1.0,
@@ -767,6 +800,11 @@ def safety_stock_form(mode='add', record_id=None):
     
     with col1:
         if st.button("Save", type="primary", use_container_width=True):
+            # Validate product selection for add mode
+            if mode == 'add' and not product_id:
+                st.error("Please select a product before saving")
+                return
+            
             data = {
                 'product_id': product_id,
                 'entity_id': entity_id,

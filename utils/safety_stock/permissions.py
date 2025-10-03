@@ -186,28 +186,6 @@ def get_export_row_limit() -> int:
     return EXPORT_ROW_LIMITS.get(role, 1000)
 
 
-def check_permission_and_show_error(permission: str) -> bool:
-    """
-    Check permission and show error if denied
-    
-    Args:
-        permission: Permission to check
-    
-    Returns:
-        bool: True if allowed, False if denied
-    """
-    if not has_permission(permission):
-        st.error(get_permission_message(permission))
-        
-        # Log permission denial
-        username = st.session_state.get('username', 'unknown')
-        role = get_user_role()
-        logger.warning(f"Permission denied: {permission} for user {username} (role: {role})")
-        
-        return False
-    return True
-
-
 def get_user_info_display() -> str:
     """
     Get formatted user info for display

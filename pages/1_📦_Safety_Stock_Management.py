@@ -27,7 +27,6 @@ from utils.safety_stock.crud import (
 from utils.safety_stock.calculations import (
     calculate_safety_stock, 
     Z_SCORE_MAP,
-    recommend_method
 )
 from utils.safety_stock.demand_analysis import (
     fetch_demand_stats,
@@ -49,7 +48,6 @@ from utils.safety_stock.permissions import (
     has_permission,
     filter_data_for_customer,
     get_permission_message,
-    check_permission_and_show_error,
     get_user_info_display,
     apply_export_limit,
     log_action
